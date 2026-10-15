@@ -1,0 +1,159 @@
+# Reusable workflow that refreshes one apple-top-<media> data repository.
+# Data repositories call it with:
+#   uses: rss2401/apple-top/.github/workflows/update-data.yml@main
+# It runs in the calling repository: checkout, GITHUB_TOKEN, commits, and the
+# Pages deployment all belong to the data repository.
+name: Update Apple Top data
+
+on:
+  workflow_call:
+    inputs:
+      media:
+        description: 'Media types handled by the calling repository (comma or space separated)'
+        required: true
+        type: string
+      countries:
+        description: 'Country codes separated by commas or spaces; empty for all'
+        required: false
+        type: string
+        default: ''
+      limit:
+        description: 'Maximum results requested from each RSS feed'
+        required: false
+        type: number
+        default: 100
+      skip_existing:
+        description: 'Reuse files already committed by an earlier run'
+        required: false
+        type: boolean
+        default: false
+      generate_markdown:
+        description: 'Generate Markdown summaries alongside ranking files'
+        required: false
+        type: boolean
+        default: false
+      tool_ref:
+        description: 'Branch, tag, or commit of rss2401/apple-top that provides the downloader'
+        required: false
+        type: string
+        default: main
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      MEDIA: ${{ inputs.media }}
+      SELECTED_COUNTRIES: ${{ inputs.countries }}
+      TOOL: _tool/scripts/downloader.mjs
+
+    steps:
+      - name: Checkout data repository
+        uses: actions/checkout@v6
+
+      - name: Checkout downloader
+        uses: actions/checkout@v6
+        with:
+          repository: rss2401/apple-top
+          ref: ${{ inputs.tool_ref }}
+          path: _tool
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Run downloader unit tests
+        run: node --test _tool/scripts/downloader.test.mjs
+
+      - name: Prepare archive month and Git identity
+        shell: bash
+        run: |
+          echo "ARCHIVE_MONTH=$(date -u +'%Y%m')" >> "$GITHUB_ENV"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Stage 1 - Download ranking RSS
+        shell: bash
+        run: |
+          args=(rank --media "$MEDIA" --month "$ARCHIVE_MONTH" --limit "${{ inputs.limit }}")
+          if [[ "${{ inputs.skip_existing }}" == "true" ]]; then args+=(--skip-existing); fi
+          if [[ -n "$SELECTED_COUNTRIES" ]]; then args+=(--countries "$SELECTED_COUNTRIES"); fi
+          node "$TOOL" "${args[@]}"
+
+      - name: Stage 1 - Commit ranking checkpoint
+        shell: bash
+        run: |
+          git add -- "rankings/$ARCHIVE_MONTH"
+          if ! git diff --cached --quiet; then
+            git commit -m "Archive ranking RSS $ARCHIVE_MONTH"
+            git push
+          else
+            echo "No ranking RSS changes to commit."
+          fi
+
+      - name: Stage 2 - Download detail JSON and curated lists
+        shell: bash
+        run: |
+          args=(details --media "$MEDIA" --month "$ARCHIVE_MONTH")
+          if [[ "${{ inputs.skip_existing }}" == "true" ]]; then args+=(--skip-existing); fi
+          if [[ -n "$SELECTED_COUNTRIES" ]]; then args+=(--countries "$SELECTED_COUNTRIES"); fi
+          node "$TOOL" "${args[@]}"
+
+          # Only the apps repository has lists/. The details command above has
+          # already refreshed curated IDs, so the lists command reuses them.
+          if [[ -d lists ]]; then
+            lists_args=(lists --media "$MEDIA" --skip-existing)
+            if [[ -n "$SELECTED_COUNTRIES" ]]; then lists_args+=(--countries "$SELECTED_COUNTRIES"); fi
+            node "$TOOL" "${lists_args[@]}"
+          fi
+
+      - name: Stage 2 - Commit details checkpoint
+        shell: bash
+        run: |
+          git add -- details
+          if [[ -d lists ]]; then git add -- lists; fi
+          if ! git diff --cached --quiet; then
+            git commit -m "Update ranking details $ARCHIVE_MONTH"
+            git push
+          else
+            echo "No detail changes to commit."
+          fi
+
+      - name: Stage 3 - Download media and publish index
+        shell: bash
+        run: |
+          args=(media --media "$MEDIA" --month "$ARCHIVE_MONTH")
+          if [[ "${{ inputs.generate_markdown }}" == "true" ]]; then args+=(--generate-markdown); fi
+          if [[ "${{ inputs.skip_existing }}" == "true" ]]; then args+=(--skip-existing); fi
+          if [[ -n "$SELECTED_COUNTRIES" ]]; then args+=(--countries "$SELECTED_COUNTRIES"); fi
+          node "$TOOL" "${args[@]}"
+
+      - name: Stage 3 - Commit completed archive
+        shell: bash
+        run: |
+          git add -- logos rankings archives rankings.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Complete ranking archive $ARCHIVE_MONTH"
+            git push
+          else
+            echo "No media or index changes to commit."
+          fi
+
+      - name: Remove downloader checkout before publishing
+        run: rm -rf _tool
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

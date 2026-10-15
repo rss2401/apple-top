@@ -1,0 +1,989 @@
+const dateSelect = document.getElementById('dateSelect');
+const countrySelect = document.getElementById('countrySelect');
+const mediaTypeSelect = document.getElementById('mediaTypeSelect');
+const feedSelect = document.getElementById('feedSelect');
+const appGrid = document.getElementById('appGrid');
+const appModal = document.getElementById('appModal');
+const modalBody = document.getElementById('modalBody');
+const closeModalBtn = document.querySelector('.close-modal');
+const jsonListButton = document.getElementById('jsonListButton');
+const themeToggle = document.getElementById('themeToggle');
+const subTitle = document.querySelector('.title-sub');
+let allFiles = [];
+let availableDates = new Set();
+let availableCountries = new Set();
+let availableMediaTypes = new Set();
+let availableFeeds = new Set();
+
+// Source value used for files under lists/ (manually curated app collections).
+const CURATED_SOURCE = 'curated';
+
+// Each media type lives in its own data repository, published next to this
+// site: rss2401.github.io/apple-top/ reads rss2401.github.io/apple-top-<media>/.
+// Locally, serve the folder that contains all apple-top* checkouts side by side.
+const MEDIA_TYPES = ['apps', 'music', 'podcasts', 'books', 'audio-books'];
+
+function dataBase(mediaType) {
+    return `../apple-top-${mediaType}/`;
+}
+
+function dataPath(mediaType, relativePath) {
+    return `${dataBase(mediaType)}${String(relativePath).replace(/\\/g, '/')}`;
+}
+
+function selectedMediaType() {
+    return mediaTypeSelect.value || 'apps';
+}
+
+// Cache for app details to avoid re-fetching
+const appDetailsCache = {};
+
+const systemThemePreference = window.matchMedia('(prefers-color-scheme: dark)');
+
+function hashArtworkUrl(url) {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < url.length; index += 1) {
+        hash ^= url.charCodeAt(index);
+        hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function getStableLogoPath(id, mediaType = selectedMediaType()) {
+    return dataPath(mediaType, `logos/${id}.png`);
+}
+
+function getVersionedLogoPath(id, artworkUrl, mediaType = selectedMediaType()) {
+    return artworkUrl
+        ? dataPath(mediaType, `logos/${id}-${hashArtworkUrl(artworkUrl)}.png`)
+        : getStableLogoPath(id, mediaType);
+}
+
+function setImageFallbacks(image, fallbackUrls) {
+    const initialUrl = image.getAttribute('src');
+    const urls = [...new Set(fallbackUrls.filter(url => url && url !== initialUrl))];
+    let nextUrl = 0;
+
+    image.addEventListener('error', () => {
+        if (nextUrl >= urls.length) return;
+        image.src = urls[nextUrl];
+        nextUrl += 1;
+    });
+}
+
+function getSavedTheme() {
+    try {
+        const theme = localStorage.getItem('theme');
+        return theme === 'light' || theme === 'dark' ? theme : null;
+    } catch {
+        return null;
+    }
+}
+
+function updateThemeToggle() {
+    const isDark = document.documentElement.dataset.theme === 'dark';
+    const label = isDark ? 'Switch to light theme' : 'Switch to dark theme';
+    themeToggle.setAttribute('aria-label', label);
+    themeToggle.title = label;
+    themeToggle.innerHTML = isDark
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"></path></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2z"></path></svg>';
+}
+
+themeToggle.addEventListener('click', () => {
+    const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = theme;
+    try {
+        localStorage.setItem('theme', theme);
+    } catch {
+        // The current page still switches even when persistence is unavailable.
+    }
+    updateThemeToggle();
+});
+
+systemThemePreference.addEventListener('change', event => {
+    if (getSavedTheme()) return;
+    document.documentElement.dataset.theme = event.matches ? 'dark' : 'light';
+    updateThemeToggle();
+});
+
+updateThemeToggle();
+
+// Close modal events
+closeModalBtn.onclick = () => appModal.style.display = "none";
+window.onclick = (event) => {
+    if (event.target == appModal) {
+        appModal.style.display = "none";
+    }
+}
+
+function fetchJson(path) {
+    return fetch(path).then(response => {
+        if (!response.ok) throw new Error(`Failed to load ${path}`);
+        return response.json();
+    });
+}
+
+// Load the rankings.json index of every data repository. A repository that is
+// missing or unreachable only hides its media type.
+async function loadAllIndexes() {
+    const outcomes = await Promise.allSettled(MEDIA_TYPES.map(async mediaType => {
+        const files = await fetchJson(dataPath(mediaType, 'rankings.json'));
+        return files.map(file => ({ ...file, SourceMedia: mediaType }));
+    }));
+
+    const files = [];
+    outcomes.forEach((outcome, index) => {
+        if (outcome.status === 'fulfilled') files.push(...outcome.value);
+        else console.warn(`Data for ${MEDIA_TYPES[index]} is unavailable:`, outcome.reason);
+    });
+    if (files.length === 0) throw new Error('No data repository index could be loaded.');
+    return files;
+}
+
+loadAllIndexes()
+    .then(files => {
+        allFiles = files;
+        processFiles();
+        populateDropdowns();
+        jsonListButton.disabled = !allFiles.some(file => file.parsed);
+        
+        // Auto-select most recent if available (excluding the special Curated Lists date)
+        const newestDate = Array.from(availableDates).filter(d => d !== CURATED_SOURCE).sort().reverse()[0];
+        if (newestDate) {
+            dateSelect.value = newestDate;
+            updateAvailableOptions();
+            // Try to set defaults if available
+            if (countrySelect.options.length > 1) countrySelect.selectedIndex = 1;
+            updateAvailableOptions(); // Update downstream
+            if (mediaTypeSelect.options.length > 1) mediaTypeSelect.selectedIndex = 1;
+            updateAvailableOptions(); // Update downstream
+            if (feedSelect.options.length > 1) feedSelect.selectedIndex = 1;
+            
+            loadRankings();
+        }
+    })
+    .catch(err => {
+        appGrid.innerHTML = `<div class="error">Unable to load data.<br>Ensure the apple-top-&lt;media&gt; data sites are published next to this site.</div>`;
+        console.error(err);
+    });
+
+function processFiles() {
+    allFiles.forEach(file => {
+        const parts = file.RelativePath.split(/[/\\]/);
+        // rankings/YYYYMM/<file>.json or lists/<file>.json
+        const isCurated = parts[0] === 'lists' && parts.length === 2;
+        if (isCurated || (parts[0] === 'rankings' && parts.length >= 3)) {
+            const date = isCurated ? CURATED_SOURCE : parts[1];
+            const filename = parts[parts.length - 1];
+            const nameParts = filename.replace('.json', '').split('_');
+            
+            if (nameParts.length >= 3) {
+                const country = nameParts[0];
+                const mediaType = nameParts[1];
+                const feed = nameParts.slice(2).join('_'); // Join rest in case feed has underscores (though we use hyphens)
+                
+                file.parsed = { date, country, mediaType, feed };
+                availableDates.add(date);
+            }
+        }
+    });
+}
+
+// Curated Lists first, then archive dates from newest to oldest.
+function compareSources(left, right) {
+    if (left === CURATED_SOURCE) return right === CURATED_SOURCE ? 0 : -1;
+    if (right === CURATED_SOURCE) return 1;
+    return right.localeCompare(left);
+}
+
+function populateDropdowns() {
+    const sortedDates = Array.from(availableDates).sort(compareSources);
+    sortedDates.forEach(date => {
+        const option = document.createElement('option');
+        option.value = date;
+        option.textContent = formatDate(date);
+        dateSelect.appendChild(option);
+    });
+}
+
+function formatDate(dateStr) {
+    if (dateStr === CURATED_SOURCE) {
+        return 'Curated Lists';
+    }
+    if (/^\d{6}$/.test(dateStr)) {
+        // YYYYMM -> YYYY-MM
+        return `${dateStr.substring(0, 4)}-${dateStr.substring(4, 6)}`;
+    }
+    return dateStr;
+}
+
+function updateAvailableOptions({ selectFirstFeed = false, loadIfComplete = true } = {}) {
+    const selectedDate = dateSelect.value;
+    const currentCountry = countrySelect.value;
+    const currentMediaType = mediaTypeSelect.value;
+    const currentFeed = feedSelect.value;
+
+    countrySelect.disabled = false;
+    mediaTypeSelect.disabled = false;
+
+    // 1. Update Country (depends on Date)
+    availableCountries.clear();
+    allFiles.forEach(file => {
+        if (file.parsed && file.parsed.date === selectedDate) {
+            availableCountries.add(file.parsed.country);
+        }
+    });
+    
+    countrySelect.innerHTML = '<option value="" disabled>Region</option>';
+    const sortedCountries = Array.from(availableCountries).sort();
+    sortedCountries.forEach(country => {
+        const option = document.createElement('option');
+        option.value = country;
+        option.textContent = country.toUpperCase();
+        countrySelect.appendChild(option);
+    });
+    
+    // Restore selection if still valid
+    if (availableCountries.has(currentCountry)) {
+        countrySelect.value = currentCountry;
+    } else {
+        countrySelect.selectedIndex = -1; // Force user to choose if previous not valid
+    }
+
+    // 2. Update Media Type (depends on Date + Country)
+    const selectedCountry = countrySelect.value;
+    availableMediaTypes.clear();
+    if (selectedCountry) {
+        allFiles.forEach(file => {
+            if (file.parsed && file.parsed.date === selectedDate && file.parsed.country === selectedCountry) {
+                availableMediaTypes.add(file.parsed.mediaType);
+            }
+        });
+    }
+    
+    mediaTypeSelect.innerHTML = '<option value="" disabled>Media Type</option>';
+    const sortedMediaTypes = Array.from(availableMediaTypes).sort();
+    sortedMediaTypes.forEach(type => {
+        const option = document.createElement('option');
+        option.value = type;
+        option.textContent = type.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+        mediaTypeSelect.appendChild(option);
+    });
+
+    if (availableMediaTypes.has(currentMediaType)) {
+        mediaTypeSelect.value = currentMediaType;
+    } else {
+        mediaTypeSelect.selectedIndex = -1;
+    }
+
+    // 3. Update Feed (depends on Date + Country + MediaType)
+    const selectedMediaType = mediaTypeSelect.value;
+    availableFeeds.clear();
+    if (selectedCountry && selectedMediaType) {
+        allFiles.forEach(file => {
+            if (file.parsed && 
+                file.parsed.date === selectedDate && 
+                file.parsed.country === selectedCountry &&
+                file.parsed.mediaType === selectedMediaType) {
+                availableFeeds.add(file.parsed.feed);
+            }
+        });
+    }
+
+    feedSelect.innerHTML = '<option value="" disabled>Category</option>';
+    const sortedFeeds = Array.from(availableFeeds).sort();
+    sortedFeeds.forEach(feed => {
+        const option = document.createElement('option');
+        option.value = feed;
+        option.textContent = feed.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+        feedSelect.appendChild(option);
+    });
+
+    if (selectFirstFeed && sortedFeeds.length > 0) {
+        feedSelect.value = sortedFeeds[0];
+    } else if (availableFeeds.has(currentFeed)) {
+        feedSelect.value = currentFeed;
+    } else {
+        feedSelect.selectedIndex = -1;
+    }
+
+    // If we still have a valid selection for everything, load it
+    if (loadIfComplete && dateSelect.value && countrySelect.value && mediaTypeSelect.value && feedSelect.value) {
+        loadRankings();
+    }
+}
+
+dateSelect.addEventListener('change', () => {
+    updateAvailableOptions({ selectFirstFeed: true });
+});
+
+countrySelect.addEventListener('change', () => {
+    updateAvailableOptions();
+});
+
+mediaTypeSelect.addEventListener('change', () => {
+    updateAvailableOptions({ selectFirstFeed: true });
+});
+
+feedSelect.addEventListener('change', () => {
+    loadRankings();
+});
+
+jsonListButton.addEventListener('click', showJsonFileList);
+
+function formatLabel(value) {
+    return String(value || '')
+        .split('-')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+}
+
+function formatFileSize(bytes) {
+    const size = Number(bytes);
+    if (!Number.isFinite(size) || size < 0) return '';
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / 1024 ** 2).toFixed(1)} MB`;
+}
+
+const OFFICIAL_MEDIA_LOGOS = {
+    apps: { id: '375380948', alt: 'Apple Store' },
+    music: { id: '1598433714', alt: 'Apple Music Classical' },
+    podcasts: { id: '525463029', alt: 'Apple Podcasts' },
+    books: { id: '364709193', alt: 'Apple Books' },
+    'audio-books': { id: '364709193', alt: 'Apple Books' }
+};
+
+function renderMediaIcon(mediaType) {
+    const official = OFFICIAL_MEDIA_LOGOS[mediaType];
+    const iconIds = {
+        apps: 'media-icon-apps',
+        music: 'media-icon-music',
+        podcasts: 'media-icon-podcasts',
+        books: 'media-icon-books',
+        'audio-books': 'media-icon-audio-books'
+    };
+    const fallbackSvgId = iconIds[mediaType] || 'media-icon-file';
+    const svgFallbackHtml = `<svg viewBox="0 0 24 24" class="media-svg-icon"><use href="#${fallbackSvgId}"></use></svg>`;
+
+    if (official) {
+        return `
+            <img src="${escapeHtml(getStableLogoPath(official.id, 'apps'))}"
+                 alt="${escapeHtml(official.alt)}" 
+                 class="media-official-logo" 
+                 loading="lazy" 
+                 onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='block';">
+            ${svgFallbackHtml.replace('<svg ', '<svg style="display:none;" ')}
+        `.trim();
+    }
+    return svgFallbackHtml;
+}
+
+function formatCountryName(country) {
+    const names = {
+        us: 'United States',
+        cn: 'China',
+        jp: 'Japan',
+        gb: 'United Kingdom',
+        de: 'Germany',
+        fr: 'France'
+    };
+    return names[country] || country.toUpperCase();
+}
+
+function renderJsonFileCard(file, date, selected) {
+    const { country, mediaType, feed } = file.parsed;
+    const isCurrent = date === selected.date
+        && country === selected.country
+        && mediaType === selected.mediaType
+        && feed === selected.feed;
+    const relativePath = dataPath(file.SourceMedia, file.RelativePath);
+
+    return `
+        <article class="json-file-card${isCurrent ? ' is-current' : ''}"
+            data-date="${escapeHtml(date)}"
+            data-country="${escapeHtml(country)}"
+            data-media="${escapeHtml(mediaType)}"
+            data-feed="${escapeHtml(feed)}"
+            role="button"
+            tabindex="0"
+            aria-label="Switch to ${escapeHtml(country.toUpperCase())} ${escapeHtml(formatLabel(mediaType))} ${escapeHtml(formatLabel(feed))}">
+            <div class="json-file-card-top">
+                <span class="json-file-icon" aria-hidden="true">${renderMediaIcon(mediaType)}</span>
+                <div class="json-file-identity">
+                    <div class="json-file-title-row">
+                        <strong>${escapeHtml(formatLabel(mediaType))}</strong>
+                        ${isCurrent ? '<span class="json-current-badge">Current</span>' : ''}
+                    </div>
+                    <span class="json-feed-name">${escapeHtml(formatLabel(feed))}</span>
+                </div>
+                <span class="json-open-icon" aria-hidden="true">→</span>
+            </div>
+            <div class="json-file-card-footer">
+                <a class="json-file-name" href="${escapeHtml(relativePath)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(file.Name)}">${escapeHtml(file.Name)}</a>
+                <span class="json-file-size">${escapeHtml(formatFileSize(file.Length))}</span>
+            </div>
+        </article>
+    `;
+}
+
+function showJsonFileList() {
+    const mediaTypeOrder = ['apps', 'music', 'podcasts', 'books', 'audio-books'];
+    const files = allFiles
+        .filter(file => file.parsed)
+        .sort((left, right) => {
+            return compareSources(left.parsed.date, right.parsed.date)
+                || left.parsed.country.localeCompare(right.parsed.country)
+                || mediaTypeOrder.indexOf(left.parsed.mediaType) - mediaTypeOrder.indexOf(right.parsed.mediaType)
+                || left.parsed.feed.localeCompare(right.parsed.feed);
+        });
+
+    const filesByDate = new Map();
+    files.forEach(file => {
+        if (!filesByDate.has(file.parsed.date)) filesByDate.set(file.parsed.date, []);
+        filesByDate.get(file.parsed.date).push(file);
+    });
+
+    const selected = {
+        date: dateSelect.value,
+        country: countrySelect.value,
+        mediaType: mediaTypeSelect.value,
+        feed: feedSelect.value
+    };
+
+    const filesByYear = new Map();
+    filesByDate.forEach((dateFiles, date) => {
+        const year = date === CURATED_SOURCE ? 'Curated' : date.substring(0, 4);
+        if (!filesByYear.has(year)) filesByYear.set(year, []);
+        filesByYear.get(year).push([date, dateFiles]);
+    });
+
+    const dateNavigation = Array.from(filesByYear, ([year, yearDates]) => `
+        <div class="json-date-year-group">
+            <strong class="json-date-year">${escapeHtml(year)}</strong>
+            <div class="json-date-year-links">
+                ${yearDates.map(([date, dateFiles]) => `
+                    <a class="json-date-link${date === selected.date ? ' is-selected' : ''}" href="#json-date-${escapeHtml(date)}">
+                        <span>${escapeHtml(formatDate(date))}</span>
+                        <strong>${dateFiles.length}</strong>
+                    </a>
+                `).join('')}
+            </div>
+        </div>
+    `).join('');
+
+    const sections = Array.from(filesByDate, ([date, dateFiles]) => {
+        const filesByCountry = new Map();
+        dateFiles.forEach(file => {
+            const country = file.parsed.country;
+            if (!filesByCountry.has(country)) filesByCountry.set(country, []);
+            filesByCountry.get(country).push(file);
+        });
+
+        const countrySections = Array.from(filesByCountry, ([country, countryFiles]) => `
+            <div class="json-country-group">
+                <div class="json-country-heading">
+                    <span class="json-country-code">${escapeHtml(country.toUpperCase())}</span>
+                    <strong>${escapeHtml(formatCountryName(country))}</strong>
+                    <span>${countryFiles.length} files</span>
+                </div>
+                <div class="json-file-grid">
+                    ${countryFiles.map(file => renderJsonFileCard(file, date, selected)).join('')}
+                </div>
+            </div>
+        `).join('');
+
+        return `
+            <section id="json-date-${escapeHtml(date)}" class="json-archive-section">
+                <div class="json-date-heading">
+                    <h3>${escapeHtml(formatDate(date))}</h3>
+                    <span>${dateFiles.length} files</span>
+                </div>
+                ${countrySections}
+            </section>
+        `;
+    }).join('');
+
+    modalBody.innerHTML = `
+        <div class="json-list-header">
+            <span class="json-list-eyebrow">Rankings index</span>
+            <h2>JSON Files</h2>
+            <p>${files.length} archived ranking files. Select a card to open its raw JSON data.</p>
+        </div>
+        <nav class="json-date-nav" aria-label="Archive dates">
+            <div class="json-date-nav-summary">
+                <strong>Archive dates</strong>
+            </div>
+            <div class="json-date-nav-links">
+                ${dateNavigation}
+            </div>
+        </nav>
+        <div class="json-list-content">
+            ${sections || '<div class="error">No JSON files are available.</div>'}
+        </div>
+    `;
+    modalBody.querySelectorAll('.json-file-card').forEach(card => {
+        const selectCard = () => selectRankingFile(card.dataset);
+        card.addEventListener('click', event => {
+            if (!event.target.closest('.json-file-name')) selectCard();
+        });
+        card.addEventListener('keydown', event => {
+            if (event.target.closest('.json-file-name')) return;
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                selectCard();
+            }
+        });
+    });
+    appModal.classList.add('json-index-modal');
+    appModal.style.display = 'flex';
+
+    const dateNav = modalBody.querySelector('.json-date-nav');
+    const updateDateAnchorOffset = () => {
+        modalBody.style.setProperty('--json-date-nav-offset', `${dateNav.offsetHeight + 12}px`);
+    };
+    updateDateAnchorOffset();
+    modalBody.querySelectorAll('.json-date-link').forEach(link => {
+        link.addEventListener('click', updateDateAnchorOffset);
+    });
+}
+
+function selectRankingFile({ date, country, media, feed }) {
+    dateSelect.value = date;
+    updateAvailableOptions({ loadIfComplete: false });
+
+    countrySelect.value = country;
+    updateAvailableOptions({ loadIfComplete: false });
+
+    mediaTypeSelect.value = media;
+    updateAvailableOptions({ loadIfComplete: false });
+
+    feedSelect.value = feed;
+    appModal.style.display = 'none';
+    loadRankings();
+}
+
+function loadRankings() {
+    const date = dateSelect.value;
+    const country = countrySelect.value;
+    const mediaType = mediaTypeSelect.value;
+    const feed = feedSelect.value;
+
+    if (!date || !country || !mediaType || !feed) return;
+
+    appGrid.innerHTML = '<div class="loading">Loading charts...</div>';
+
+    const file = allFiles.find(f => 
+        f.parsed && 
+        f.parsed.date === date && 
+        f.parsed.country === country && 
+        f.parsed.mediaType === mediaType &&
+        f.parsed.feed === feed
+    );
+
+    if (!file) {
+        appGrid.innerHTML = '<div class="error">Data file not found.</div>';
+        return;
+    }
+
+    const fetchPath = dataPath(file.SourceMedia, file.RelativePath);
+
+    fetch(fetchPath)
+        .then(res => res.json())
+        .then(data => {
+            if (data.feed && data.feed.results) {
+                subTitle.textContent = data.feed.title || '';
+                renderApps(data.feed.results);
+            } else {
+                throw new Error("Invalid data format");
+            }
+        })
+        .catch(err => {
+            appGrid.innerHTML = `<div class="error">Error loading rankings: ${escapeHtml(err.message)}</div>`;
+        });
+}
+
+const COUNTRY_ISO_MAP = {
+    us: 'USA',
+    cn: 'CHN',
+    jp: 'JPN',
+    gb: 'GBR',
+    de: 'DEU',
+    fr: 'FRA'
+};
+
+function selectLocalizedDetail(results, targetCountry) {
+    if (!Array.isArray(results) || results.length === 0) return null;
+    const targetIso = COUNTRY_ISO_MAP[String(targetCountry).toLowerCase()] || String(targetCountry).toUpperCase();
+    return results.find(item => 
+        item.country === targetIso || 
+        item.country === targetCountry || 
+        item.country?.toLowerCase() === String(targetCountry).toLowerCase()
+    ) || results[0];
+}
+
+async function getAppDetails(appId, country = countrySelect.value, mediaType = selectedMediaType()) {
+    const cacheKey = `${mediaType}:${appId}:${country}`;
+    if (Object.prototype.hasOwnProperty.call(appDetailsCache, cacheKey)) {
+        return appDetailsCache[cacheKey];
+    }
+
+    let details = null;
+    try {
+        const data = await fetchJson(dataPath(mediaType, `details/${appId}.json`));
+        if (data.resultCount > 0) {
+            details = selectLocalizedDetail(data.results, country);
+        }
+    } catch {
+        // Some media types are not returned by the iTunes lookup endpoint.
+    }
+    appDetailsCache[cacheKey] = details;
+    return details;
+}
+
+function renderApps(apps) {
+    appGrid.innerHTML = '';
+
+    apps.forEach((app, index) => {
+        const item = document.createElement('div');
+        item.className = 'app-item';
+        item.onclick = () => showAppDetails(app.id, app); // Pass basic app info as backup
+
+        const localLogoPath = getStableLogoPath(app.id);
+        const artworkUrl = app.artworkUrl100 || app.artworkUrl60 || '';
+        const name = app.name || `App ${app.id}`;
+        const artistName = app.artistName || '';
+        
+        item.innerHTML = `
+            <img src="${escapeHtml(localLogoPath)}" alt="${escapeHtml(name)}" class="app-logo">
+            <div class="app-info">
+                <div class="app-header">
+                    <span class="app-rank">${index + 1}</span>
+                    <span class="app-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                </div>
+                <div class="app-meta" title="${escapeHtml(artistName)}">
+                    ${escapeHtml(artistName)}
+                </div>
+            </div>
+        `;
+
+        setImageFallbacks(item.querySelector('.app-logo'), [artworkUrl]);
+        appGrid.appendChild(item);
+    });
+}
+
+const appArchiveCache = {};
+
+async function getAppArchive(appId, mediaType = selectedMediaType()) {
+    const cacheKey = `${mediaType}:${appId}`;
+    if (Object.prototype.hasOwnProperty.call(appArchiveCache, cacheKey)) {
+        return appArchiveCache[cacheKey];
+    }
+    let archive = null;
+    try {
+        archive = await fetchJson(dataPath(mediaType, `archives/${appId}.json`));
+    } catch {
+        // Archives might not exist for non-ranking items
+    }
+    appArchiveCache[cacheKey] = archive;
+    return archive;
+}
+
+function renderArchiveSection(archive, appId) {
+    const results = Array.isArray(archive?.results) ? archive.results : (Array.isArray(archive?.history) ? archive.history : []);
+    if (results.length === 0) {
+        return '';
+    }
+
+    const monthOf = entry => String(entry.month || entry.date || '');
+    const sortedHistory = [...results].sort((a, b) => monthOf(b).localeCompare(monthOf(a)));
+    const countries = [...new Set(sortedHistory.map(h => h.country))].sort();
+
+    const historyItemsHtml = sortedHistory.map(entry => {
+        const logoUrl = entry.artworkUrl100 || entry.artworkUrl60 || entry.artworkUrl || '';
+        const versionedLogo = getVersionedLogoPath(appId, logoUrl);
+        const formattedDate = formatDate(monthOf(entry));
+        const countryCode = (entry.country || 'us').toUpperCase();
+        const feedLabel = (entry.feed || '').replace(/-/g, ' ');
+        const rankClass = entry.rank <= 3 ? ` rank-top-${entry.rank}` : '';
+
+        return `
+            <div class="archive-history-item" data-country="${escapeHtml(entry.country)}">
+                <img src="${escapeHtml(versionedLogo)}" alt="${escapeHtml(entry.name || '')}" class="archive-history-icon" loading="lazy" data-fallback="${escapeHtml(logoUrl)}">
+                <div class="archive-history-content">
+                    <div class="archive-history-top">
+                        <span class="archive-date-badge">${escapeHtml(formattedDate)}</span>
+                        <span class="archive-country-badge">${escapeHtml(countryCode)}</span>
+                        <span class="archive-rank-badge${rankClass}">#${entry.rank}</span>
+                    </div>
+                    <div class="archive-history-name">${escapeHtml(entry.name || '')}</div>
+                    <div class="archive-history-meta">${escapeHtml(entry.artistName || '')} • ${escapeHtml(feedLabel)}</div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    return `
+        <div class="modal-section archive-section">
+            <h3>Ranking & Icon History (${results.length})</h3>
+            ${countries.length > 1 ? `
+                <div class="archive-filter-tabs">
+                    <button class="archive-tab active" data-filter="all">All (${results.length})</button>
+                    ${countries.map(c => `<button class="archive-tab" data-filter="${escapeHtml(c)}">${escapeHtml(c.toUpperCase())}</button>`).join('')}
+                </div>
+            ` : ''}
+            <div class="archive-history-list">
+                ${historyItemsHtml}
+            </div>
+        </div>
+    `;
+}
+
+function setupArchiveTabs(container) {
+    const tabs = container.querySelectorAll('.archive-tab');
+    const items = container.querySelectorAll('.archive-history-item');
+
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            tabs.forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+
+            const filter = tab.dataset.filter;
+            items.forEach(item => {
+                if (filter === 'all' || item.dataset.country === filter) {
+                    item.style.display = 'flex';
+                } else {
+                    item.style.display = 'none';
+                }
+            });
+        });
+    });
+
+    container.querySelectorAll('.archive-history-icon').forEach(img => {
+        const fallback = img.dataset.fallback;
+        if (fallback) setImageFallbacks(img, [fallback]);
+    });
+}
+
+async function showAppDetails(appId, basicAppInfo) {
+    appModal.classList.remove('json-index-modal');
+    modalBody.innerHTML = '<div class="loading">Loading details...</div>';
+    appModal.style.display = "flex";
+
+    const currentCountry = countrySelect.value;
+    const [details, archive] = await Promise.all([
+        getAppDetails(appId, currentCountry),
+        getAppArchive(appId)
+    ]);
+
+    renderModalContent(details, appId, basicAppInfo, archive);
+}
+
+function formatAppDate(dateString) {
+    if (!dateString) return '-';
+    const date = new Date(dateString);
+    if (Number.isNaN(date.getTime())) return dateString;
+
+    const year = date.getFullYear();
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const day = date.getDate().toString().padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function formatGenres(genres) {
+    if (!Array.isArray(genres)) return '';
+    return genres
+        .map(genre => typeof genre === 'string' ? genre : genre?.name)
+        .filter(Boolean)
+        .join(', ');
+}
+
+function formatMediaType(kind) {
+    const labels = {
+        apps: 'App',
+        software: 'App',
+        songs: 'Song',
+        song: 'Song',
+        albums: 'Album',
+        album: 'Album',
+        podcasts: 'Podcast',
+        podcast: 'Podcast',
+        books: 'Book',
+        'audio-books': 'Audiobook'
+    };
+
+    return labels[kind] || kind || 'Media';
+}
+
+function formatPrice(app) {
+    if (app.formattedPrice) return app.formattedPrice;
+
+    const price = app.trackPrice ?? app.collectionPrice;
+    if (price === undefined || price === null) return '';
+    if (Number(price) === 0) return 'Free';
+
+    try {
+        return new Intl.NumberFormat(undefined, {
+            style: 'currency',
+            currency: app.currency || 'USD'
+        }).format(price);
+    } catch {
+        return `${price} ${app.currency || ''}`.trim();
+    }
+}
+
+function formatDuration(milliseconds) {
+    if (!milliseconds) return '';
+    const totalSeconds = Math.round(milliseconds / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = String(totalSeconds % 60).padStart(2, '0');
+    return `${minutes}:${seconds}`;
+}
+
+function renderStat(label, value, sub = '') {
+    return `
+        <div class="stat-item">
+            <div class="stat-label">${escapeHtml(label)}</div>
+            <div class="stat-value">${escapeHtml(value || '-')}</div>
+            ${sub ? `<div class="stat-sub">${escapeHtml(sub)}</div>` : ''}
+        </div>
+    `;
+}
+
+function renderInfoRows(rows) {
+    return rows
+        .filter(([, value]) => value !== undefined && value !== null && value !== '')
+        .map(([label, value]) => `
+            <div class="info-row">
+                <span>${escapeHtml(label)}</span>
+                <span>${escapeHtml(value)}</span>
+            </div>
+        `)
+        .join('');
+}
+
+function renderModalContent(details, appId, basicAppInfo, archive) {
+    const app = details || {};
+    const stableLogoPath = getStableLogoPath(appId);
+    const title = app.trackName || app.collectionName || basicAppInfo.name || 'Untitled';
+    const subtitle = app.artistName || app.sellerName || basicAppInfo.artistName || '';
+    const kind = basicAppInfo.kind || app.kind || app.collectionType?.toLowerCase() || app.wrapperType;
+    const mediaType = formatMediaType(kind);
+    const isSoftware = app.wrapperType === 'software' || app.kind === 'software' || kind === 'apps';
+    const artworkUrl = app.artworkUrl600
+        || app.artworkUrl512
+        || app.artworkUrl100
+        || app.artworkUrl60
+        || basicAppInfo.artworkUrl100
+        || basicAppInfo.artworkUrl60
+        || '';
+    const versionArtworkUrl = basicAppInfo.artworkUrl100
+        || basicAppInfo.artworkUrl60
+        || artworkUrl;
+    const localLogoPath = getVersionedLogoPath(appId, versionArtworkUrl);
+    const storeUrl = app.trackViewUrl || app.collectionViewUrl || basicAppInfo.url || '#';
+    const price = formatPrice(app);
+    const genres = formatGenres(app.genres) || app.primaryGenreName || formatGenres(basicAppInfo.genres);
+    const releaseDate = formatAppDate(app.releaseDate || basicAppInfo.releaseDate);
+    const description = app.description || app.longDescription || '';
+    const sizeMB = app.fileSizeBytes ? `${(app.fileSizeBytes / 1024 / 1024).toFixed(1)} MB` : '';
+
+    const screenshotsHtml = Array.isArray(app.screenshotUrls) && app.screenshotUrls.length > 0 ?
+        `<div class="screenshots-scroll">
+            ${app.screenshotUrls.map(url => `<img src="${escapeHtml(url)}" class="screenshot" loading="lazy" alt="">`).join('')}
+         </div>` : '';
+
+    let statsHtml;
+    let informationRows;
+
+    if (isSoftware) {
+        const rating = Number(app.averageUserRating);
+        const ratingCount = app.userRatingCountForCurrentVersion || app.userRatingCount || 0;
+        statsHtml = [
+            renderStat('RATING', Number.isFinite(rating) ? `${rating.toFixed(1)} ★` : '-', `${ratingCount.toLocaleString()} Ratings`),
+            renderStat('AGE', app.contentAdvisoryRating || '-'),
+            renderStat('CATEGORY', genres || 'App')
+        ].join('');
+
+        informationRows = [
+            ['Provider', app.sellerName || subtitle],
+            ['Size', sizeMB],
+            ['Version', app.version],
+            ['Original Release', releaseDate],
+            ['Last Update', formatAppDate(app.currentVersionReleaseDate)],
+            ['Compatibility', app.minimumOsVersion ? `${app.minimumOsVersion}+` : '']
+        ];
+    } else {
+        const itemCount = app.trackCount
+            ? `${app.trackCount.toLocaleString()} ${app.kind === 'podcast' ? 'Episodes' : 'Tracks'}`
+            : '';
+        statsHtml = [
+            renderStat('TYPE', mediaType),
+            renderStat('GENRE', genres || '-'),
+            renderStat(app.kind === 'podcast' ? 'EPISODES' : 'RELEASED', app.kind === 'podcast' ? itemCount : releaseDate)
+        ].join('');
+
+        informationRows = [
+            [mediaType === 'Book' || mediaType === 'Audiobook' ? 'Author' : 'Artist', subtitle],
+            ['Album', app.collectionName && app.collectionName !== title ? app.collectionName : ''],
+            ['Genre', genres],
+            ['Release', releaseDate],
+            ['Duration', app.kind === 'song' ? formatDuration(app.trackTimeMillis) : ''],
+            [app.kind === 'podcast' ? 'Episodes' : 'Tracks', itemCount],
+            ['Advisory', app.contentAdvisoryRating],
+            ['Country', app.country],
+            ['Copyright', app.copyright]
+        ];
+    }
+
+    const archiveHtml = renderArchiveSection(archive, appId);
+
+    modalBody.innerHTML = `
+        <div class="modal-header-section">
+            <img src="${escapeHtml(localLogoPath)}" alt="${escapeHtml(title)}" class="modal-icon">
+            <div class="modal-title-info">
+                <h2>${escapeHtml(title)}</h2>
+                <div class="modal-subtitle">${escapeHtml(subtitle)}</div>
+                <a href="${escapeHtml(storeUrl)}" target="_blank" rel="noopener noreferrer" class="get-button">${escapeHtml(price || 'View on Apple')}</a>
+            </div>
+        </div>
+
+        <div class="stats-row">
+            ${statsHtml}
+        </div>
+
+        ${screenshotsHtml}
+
+        ${description ? `
+            <div class="modal-section">
+                <p class="description">${escapeHtml(description).replace(/\n/g, '<br>')}</p>
+            </div>
+        ` : ''}
+
+        <div class="modal-section">
+            <h3>Information</h3>
+            ${renderInfoRows(informationRows)}
+        </div>
+
+        ${archiveHtml}
+    `;
+
+    setImageFallbacks(
+        modalBody.querySelector('.modal-icon'),
+        [stableLogoPath, versionArtworkUrl]
+    );
+
+    if (archiveHtml) {
+        setupArchiveTabs(modalBody.querySelector('.archive-section'));
+    }
+}
