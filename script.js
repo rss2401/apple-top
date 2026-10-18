@@ -1,6 +1,6 @@
 import { comparisonRows, localPurchaseItems, localStorefront, purchaseNames, selectLocalizedDetail } from './pricing-data.mjs';
 import { parseListFileName } from './list-files.mjs';
-import { buildPageUrl, parsePageRoute, resolvePageSelection } from './page-route.mjs';
+import { buildPageUrl, parsePageRoute, resolvePageSelection, routeFileForIndex } from './page-route.mjs';
 
 const dateSelect = document.getElementById('dateSelect');
 const countrySelect = document.getElementById('countrySelect');
@@ -23,6 +23,8 @@ let currentApps = [];
 let activeItemRoute = null;
 let lastRoutedHref = '';
 let locationRequestSerial = 0;
+let selectedRouteFile = '';
+const subscriptionSelections = new Map();
 
 // Source value used for files under lists/ (manually curated app collections).
 const CURATED_SOURCE = 'curated';
@@ -50,6 +52,10 @@ function dataPath(mediaType, relativePath) {
 
 function selectedMediaType() {
     return mediaTypeSelect.value || 'apps';
+}
+
+function itemCountry(country = countrySelect.value) {
+    return country === ALL_REGIONS ? 'us' : country;
 }
 
 // Cache for app details to avoid re-fetching
@@ -206,10 +212,20 @@ loadAllIndexes()
         console.error(err);
     });
 
+function selectedIndexFile() {
+    const matching = allFiles.filter(file => file.parsed
+        && file.parsed.date === dateSelect.value && file.parsed.country === countrySelect.value
+        && file.parsed.mediaType === selectedMediaType() && file.parsed.feed === feedSelect.value);
+    return matching.find(file => routeFileForIndex(file) === selectedRouteFile) || matching[0];
+}
+
 function syncPageUrl({ replace = false, item = activeItemRoute } = {}) {
+    const date = dateSelect.value;
+    const latestMonth = [...(priceMonthsByApp.get(item?.appId) || [])]
+        .filter(month => !/^\d{6}$/.test(date) || month <= date).sort().reverse()[0];
     const url = buildPageUrl(window.location.href, {
-        date: dateSelect.value, country: countrySelect.value,
-        mediaType: selectedMediaType(), feed: feedSelect.value, ...item
+        file: routeFileForIndex(selectedIndexFile()), date, country: countrySelect.value,
+        mediaType: selectedMediaType(), feed: feedSelect.value, latestMonth, ...item
     });
     lastRoutedHref = url.href;
     if (url.href !== window.location.href) window.history[replace ? 'replaceState' : 'pushState'](null, '', url);
@@ -221,7 +237,12 @@ async function applyLocationRoute() {
     const request = ++locationRequestSerial;
     const route = parsePageRoute(window.location.href);
     const selection = resolvePageSelection(allFiles.filter(file => file.parsed), route);
-    if (!selection) return;
+    if (!selection) {
+        closeModal({ syncUrl: false });
+        appGrid.innerHTML = '<div class="error">The requested JSON file is unavailable.</div>';
+        return;
+    }
+    selectedRouteFile = route.file;
     closeModal({ syncUrl: false });
     dateSelect.value = selection.date;
     updateAvailableOptions({ loadIfComplete: false });
@@ -692,13 +713,7 @@ async function loadRankings({ syncUrl = true } = {}) {
 
     appGrid.innerHTML = '<div class="loading">Loading charts...</div>';
 
-    const file = allFiles.find(f => 
-        f.parsed && 
-        f.parsed.date === date && 
-        f.parsed.country === country && 
-        f.parsed.mediaType === mediaType &&
-        f.parsed.feed === feed
-    );
+    const file = selectedIndexFile();
 
     if (!file) {
         appGrid.innerHTML = '<div class="error">Data file not found.</div>';
@@ -726,6 +741,7 @@ async function loadRankings({ syncUrl = true } = {}) {
 }
 
 async function getAppDetails(appId, country = countrySelect.value, mediaType = selectedMediaType()) {
+    country = itemCountry(country);
     const cacheKey = `${mediaType}:${appId}:${country}`;
     if (Object.prototype.hasOwnProperty.call(appDetailsCache, cacheKey)) {
         return appDetailsCache[cacheKey];
@@ -891,6 +907,7 @@ function renderSubscriptionPriceSection(prices, appId) {
 function setupSubscriptionPriceSection(section, prices, appId) {
     prices.purchase = section.querySelector('.price-item-select').value;
     prices.currency = section.querySelector('.price-currency-select').value;
+    subscriptionSelections.set(String(appId), { purchase: prices.purchase, currency: prices.currency });
     if (activeItemRoute?.appId === String(appId) && activeItemRoute.view === 'subscriptions') {
         activeItemRoute.comparison = { month: prices.month, purchase: prices.purchase, currency: prices.currency };
         syncPageUrl({ replace: true });
@@ -918,7 +935,7 @@ async function showSubscriptionDetails(app, navigation = {}) {
     const replaceRoute = Boolean(activeItemRoute);
     activeItemRoute = { appId: String(app.id), view: 'subscriptions', comparison: navigation.comparison };
     if (navigation.syncUrl !== false) syncPageUrl({ replace: replaceRoute });
-    const country = navigation.country || (countrySelect.value === ALL_REGIONS ? 'us' : countrySelect.value);
+    const country = itemCountry(navigation.country);
     const date = navigation.date || dateSelect.value;
     const context = { ...navigation, country, date, mediaType: 'apps' };
     appModal.classList.remove('json-index-modal');
@@ -929,7 +946,12 @@ async function showSubscriptionDetails(app, navigation = {}) {
     const month = months.includes(navigation.comparison?.month) ? navigation.comparison.month : months[0] || '';
     const next = await getComparisonPrices(app.id, month);
     if (request !== detailRequestSerial) return;
-    const prices = { ...navigation.comparison, ...next, month, months, country, data: next?.data || {}, missing: !next };
+    const remembered = subscriptionSelections.get(String(app.id));
+    const prices = {
+        ...navigation.comparison, ...next, month, months, country, data: next?.data || {}, missing: !next,
+        purchase: navigation.comparison?.purchase || remembered?.purchase,
+        currency: navigation.comparison?.currency || remembered?.currency
+    };
     const artwork = app.artworkUrl100 || app.artworkUrl60 || '';
     modalBody.innerHTML = `
         <div class="modal-header-section">
@@ -1051,7 +1073,7 @@ async function showAppDetails(appId, basicAppInfo, navigation = {}) {
     appModal.classList.remove('json-index-modal');
     modalBody.innerHTML = '<div class="loading">Loading details...</div>';
     openModal();
-    const currentCountry = navigation.country || countrySelect.value;
+    const currentCountry = itemCountry(navigation.country);
     const mediaType = navigation.mediaType || selectedMediaType();
     const date = navigation.date || dateSelect.value;
     const priceMonths = mediaType === 'apps'

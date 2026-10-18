@@ -49,23 +49,25 @@ or page layout for subscriptions.
 
 ### Shareable links
 
-The URL follows the current filters and open item. Refreshing a link or using the
-browser's Back/Forward buttons restores that view.
+The URL identifies the selected JSON file and optional item hash. Refreshing a
+link or using the browser's Back/Forward buttons restores that file and item.
 
-- `?media=books` opens Books; the other media values are `apps`, `music`, `podcasts`,
-  and `audio-books`. Singular aliases such as `media=book` also work.
-- `date=202610`, `country=us`, and `feed=top-paid` select an archive, region, and
-  category. Missing or unavailable combinations fall back to available data for
-  the requested media type.
-- `source=curated` opens curated lists; `source=subscriptions` opens subscriptions.
+- `?file=apple-top-books/rankings/202610/us_books_top-paid.json` opens that ranking.
+  Only files in the loaded repository indexes are selected; external URLs and
+  parent-directory traversal are not loaded.
+- `?file=apple-top-apps/lists/us_ai-subs.json` opens that subscription list.
+  The file determines media, source, region, category, and default modal view.
 - `#6474233312` opens that item's detail or subscription view, including items
-  outside the selected ranking. `view=details` or `view=subscriptions` selects
-  the modal view. Closing the modal clears its hash.
-- Subscription links retain `month`, `purchase`, and `currency` selections.
+  outside the selected ranking. Closing the modal clears its hash.
+- Only a non-default modal `view` and a historical snapshot `month` add query
+  parameters. The latest available snapshot is the default. Purchase and currency
+  choices stay within the page and are not written into the URL.
+- Entry points such as `?media=books`, `?media=book`, and the older filter-based
+  links still work and resolve to an indexed JSON file. GitHub Homepages retain
+  these media-only links so they always select the newest available archive.
 
-For example, `?media=apps&source=subscriptions&country=cn&feed=ai-subs#6474233312`
-opens Kimi subscriptions in China. Data repositories link to their respective
-`?media=...` view of the website from their GitHub Homepage setting.
+For example, `?file=apple-top-apps/lists/cn_ai-subs.json#6474233312` opens Kimi
+subscriptions in China. Legacy list filenames remain readable across data updates.
 
 Each data repository contains a short `.github/workflows/update.yml` that calls
 [`update-data.yml`](.github/workflows/update-data.yml) here with its media type. The shared
