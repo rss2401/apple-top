@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import {
     buildAppArchives,
+    checkUsdRates,
     collectMediaEntries,
     createCuratedEntries,
     createDetailBatches,
@@ -16,17 +17,22 @@ import {
     hasDetailForCountry,
     hashArtworkUrl,
     isLookupCompatibleId,
+    isPriceListFile,
     main,
     mapCountryToIso,
     MEDIA_TYPES,
     mergeMediaEntries,
+    parseAppStorePage,
     parseArguments,
+    parsePriceAmount,
     parseRankingFileName,
+    selectPriceStorefronts,
     planArtworkVersions,
     runCountryTasks,
     runSequential,
     shouldReuseCachedDetail,
     splitLookupResults,
+    STOREFRONTS,
     toLargeArtworkUrl
 } from './downloader.mjs';
 
@@ -56,6 +62,12 @@ test('ranking file names split into country, media type, and feed', () => {
         country: 'us', mediaType: 'audio-books', feed: 'top-audio-books'
     });
     assert.equal(parseRankingFileName('cn_top-free.json'), null);
+});
+
+test('price lists are the lists without a country_media_ prefix', () => {
+    assert.equal(isPriceListFile('ai-subs.json'), true);
+    assert.equal(isPriceListFile('us_apps_ai-apps.json'), false);
+    assert.equal(isPriceListFile('ai-subs.md'), false);
 });
 
 test('archives and index commands work inside the given data root only', async () => {
@@ -116,6 +128,108 @@ test('parseArguments defaults to the all command', () => {
 
 test('parseArguments accepts the curated lists command', () => {
     assert.equal(parseArguments(['lists']).command, 'lists');
+});
+
+test('parseArguments selects storefronts for the prices command', () => {
+    assert.equal(parseArguments(['prices']).command, 'prices');
+    assert.equal(parseArguments(['prices']).storefronts, null);
+    assert.equal(parseArguments(['prices']).allStorefronts, false);
+    assert.equal(parseArguments(['prices', '--all-storefronts']).allStorefronts, true);
+    assert.deepEqual(parseArguments(['prices', '--storefronts', 'CN', 'tr']).storefronts, ['cn', 'tr']);
+    assert.deepEqual(parseArguments(['prices', '--storefronts=us,jp']).storefronts, ['us', 'jp']);
+    assert.throws(() => parseArguments(['prices', '--storefronts', 'zz']), /Unsupported storefronts: zz/);
+    assert.throws(() => parseArguments(['prices', '--storefronts']), /at least one/);
+});
+
+test('storefront list holds every App Store storefront once', () => {
+    assert.equal(STOREFRONTS.length, 175);
+    assert.equal(new Set(STOREFRONTS).size, 175);
+    assert.deepEqual([...STOREFRONTS].sort(), STOREFRONTS);
+});
+
+test('localized App Store prices are parsed to numbers', () => {
+    assert.equal(parsePriceAmount('$19.99'), 19.99);
+    assert.equal(parsePriceAmount('USD 100.00'), 100);
+    assert.equal(parsePriceAmount('¥738.00'), 738);
+    assert.equal(parsePriceAmount('¥9,900'), 9900);
+    assert.equal(parsePriceAmount('₹ 1,999'), 1999);
+    assert.equal(parsePriceAmount('₺5.299,99'), 5299.99);
+    assert.equal(parsePriceAmount('₺999,99'), 999.99);
+    assert.equal(parsePriceAmount('1 299,00 kr'), 1299);
+    assert.equal(parsePriceAmount('Rp 299.000'), 299000);
+    assert.equal(parsePriceAmount('Rp 1.499.000,00'), 1499000);
+    assert.equal(parsePriceAmount(''), null);
+    assert.equal(parsePriceAmount('Free'), null);
+});
+
+function appStorePage({ storefront = 'tr', currency = 'TRY', items } = {}) {
+    const serverData = {
+        data: [{
+            intent: { storefront, language: 'tr', $kind: 'ProductPageIntent', id: '6448311069' },
+            data: {
+                shelves: [{
+                    id: 'information',
+                    items: [
+                        { $kind: 'Annotation', title: 'Sağlayıcı', summary: 'OpenAI', items: [] },
+                        ...(items ? [{ $kind: 'Annotation', title: 'Uygulama İçi Satın Alımlar', items }] : [])
+                    ]
+                }]
+            }
+        }]
+    };
+    return `<html><script id=software-application type="application/ld+json">`
+        + `{"@type":"SoftwareApplication","offers":{"@type":"Offer","price":0,"priceCurrency":"${currency}"}}</script>`
+        + `<script type="application/json" id="serialized-server-data">${JSON.stringify(serverData)}</script></html>`;
+}
+
+test('App Store pages yield storefront, currency, and in-app purchases', () => {
+    const page = parseAppStorePage(appStorePage({
+        items: [
+            { $kind: 'textPair', leadingText: 'ChatGPT Plus', trailingText: '₺999,99' },
+            { $kind: 'textPair', leadingText: 'ChatGPT Pro 100', trailingText: '₺5.299,99' },
+            { $kind: 'button', title: 'Learn More' }
+        ]
+    }));
+    assert.deepEqual(page, {
+        storefront: 'tr',
+        currency: 'TRY',
+        items: [
+            { name: 'ChatGPT Plus', price: '₺999,99', amount: 999.99 },
+            { name: 'ChatGPT Pro 100', price: '₺5.299,99', amount: 5299.99 }
+        ]
+    });
+});
+
+test('App Store pages without purchases or data are recognized', () => {
+    assert.deepEqual(parseAppStorePage(appStorePage({ storefront: 'cn', currency: 'CNY' })), {
+        storefront: 'cn',
+        currency: 'CNY',
+        items: []
+    });
+    // A page redirected to another storefront reports that storefront.
+    assert.equal(parseAppStorePage(appStorePage({ storefront: 'cn', items: [] })).storefront, 'cn');
+    assert.equal(parseAppStorePage('<html><!-- @@BODY@@ --></html>'), null);
+});
+
+test('prices are requested where the latest snapshot found the app', () => {
+    const snapshot = {
+        storefronts: {
+            us: { currency: 'USD', items: [] },
+            tr: { currency: 'TRY', items: [{ name: 'Plus', price: '₺999,99', amount: 999.99 }] },
+            cn: { available: false }
+        }
+    };
+    assert.deepEqual(selectPriceStorefronts(snapshot), ['tr', 'us']);
+    assert.deepEqual(selectPriceStorefronts(null), STOREFRONTS);
+    assert.deepEqual(selectPriceStorefronts(snapshot, { allStorefronts: true }), STOREFRONTS);
+    assert.deepEqual(selectPriceStorefronts(snapshot, { storefronts: ['jp'] }), ['jp']);
+    assert.deepEqual(selectPriceStorefronts({ storefronts: { cn: { available: false } } }), []);
+});
+
+test('USD rates are kept whole and must cover every listed currency', () => {
+    const data = { date: '2026-10-17', usd: { cny: 6.7, try: 49.5, usd: 1, btc: 0.00001 } };
+    assert.equal(checkUsdRates(data, ['CNY', 'TRY', 'USD']), data);
+    assert.throws(() => checkUsdRates(data, ['NGN']), /no USD rate for NGN/);
 });
 
 test('parseArguments rejects invalid values and unknown flags', () => {

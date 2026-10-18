@@ -17,6 +17,15 @@ let availableFeeds = new Set();
 
 // Source value used for files under lists/ (manually curated app collections).
 const CURATED_SOURCE = 'curated';
+// Source value used for price lists: lists/<name>.json without a country_media_
+// prefix, whose apps are priced in every storefront.
+const PRICE_LIST_SOURCE = 'price-lists';
+// Region value shown for price lists, which are not tied to one storefront.
+const ALL_REGIONS = 'all';
+const LIST_SOURCES = [CURATED_SOURCE, PRICE_LIST_SOURCE];
+
+// apps repository: prices/YYYYMM/<id>.json with prices/YYYYMM/usd-rates.json.
+const priceMonthsByApp = new Map();
 
 // Each media type lives in its own data repository, published next to this
 // site: rss2401.github.io/apple-top/ reads rss2401.github.io/apple-top-<media>/.
@@ -145,19 +154,11 @@ loadAllIndexes()
         populateDropdowns();
         jsonListButton.disabled = !allFiles.some(file => file.parsed);
         
-        // Auto-select most recent if available (excluding the special Curated Lists date)
-        const newestDate = Array.from(availableDates).filter(d => d !== CURATED_SOURCE).sort().reverse()[0];
+        // Auto-select most recent if available (excluding Curated Lists and Price Lists)
+        const newestDate = Array.from(availableDates).filter(d => !LIST_SOURCES.includes(d)).sort().reverse()[0];
         if (newestDate) {
             dateSelect.value = newestDate;
-            updateAvailableOptions();
-            // Try to set defaults if available
-            if (countrySelect.options.length > 1) countrySelect.selectedIndex = 1;
-            updateAvailableOptions(); // Update downstream
-            if (mediaTypeSelect.options.length > 1) mediaTypeSelect.selectedIndex = 1;
-            updateAvailableOptions(); // Update downstream
-            if (feedSelect.options.length > 1) feedSelect.selectedIndex = 1;
-            
-            loadRankings();
+            updateAvailableOptions(); // selects the first region, media type and feed, then loads
         }
     })
     .catch(err => {
@@ -168,14 +169,24 @@ loadAllIndexes()
 function processFiles() {
     allFiles.forEach(file => {
         const parts = file.RelativePath.split(/[/\\]/);
+        if (file.SourceMedia === 'apps' && parts[0] === 'prices' && parts.length === 3
+            && /^\d+\.json$/.test(parts[2])) {
+            const appId = parts[2].replace('.json', '');
+            if (!priceMonthsByApp.has(appId)) priceMonthsByApp.set(appId, []);
+            priceMonthsByApp.get(appId).push(parts[1]);
+            return;
+        }
         // rankings/YYYYMM/<file>.json or lists/<file>.json
-        const isCurated = parts[0] === 'lists' && parts.length === 2;
-        if (isCurated || (parts[0] === 'rankings' && parts.length >= 3)) {
-            const date = isCurated ? CURATED_SOURCE : parts[1];
+        const isList = parts[0] === 'lists' && parts.length === 2;
+        if (isList || (parts[0] === 'rankings' && parts.length >= 3)) {
+            const date = isList ? CURATED_SOURCE : parts[1];
             const filename = parts[parts.length - 1];
             const nameParts = filename.replace('.json', '').split('_');
-            
-            if (nameParts.length >= 3) {
+
+            if (isList && nameParts.length === 1) {
+                file.parsed = { date: PRICE_LIST_SOURCE, country: ALL_REGIONS, mediaType: file.SourceMedia, feed: nameParts[0] };
+                availableDates.add(PRICE_LIST_SOURCE);
+            } else if (nameParts.length >= 3) {
                 const country = nameParts[0];
                 const mediaType = nameParts[1];
                 const feed = nameParts.slice(2).join('_'); // Join rest in case feed has underscores (though we use hyphens)
@@ -187,10 +198,13 @@ function processFiles() {
     });
 }
 
-// Curated Lists first, then archive dates from newest to oldest.
+// Curated Lists and Price Lists first, then archive dates from newest to oldest.
 function compareSources(left, right) {
-    if (left === CURATED_SOURCE) return right === CURATED_SOURCE ? 0 : -1;
-    if (right === CURATED_SOURCE) return 1;
+    const leftList = LIST_SOURCES.indexOf(left);
+    const rightList = LIST_SOURCES.indexOf(right);
+    if (leftList !== -1 || rightList !== -1) {
+        return (leftList === -1 ? Infinity : leftList) - (rightList === -1 ? Infinity : rightList);
+    }
     return right.localeCompare(left);
 }
 
@@ -207,6 +221,9 @@ function populateDropdowns() {
 function formatDate(dateStr) {
     if (dateStr === CURATED_SOURCE) {
         return 'Curated Lists';
+    }
+    if (dateStr === PRICE_LIST_SOURCE) {
+        return 'Price Lists';
     }
     if (/^\d{6}$/.test(dateStr)) {
         // YYYYMM -> YYYY-MM
@@ -237,16 +254,12 @@ function updateAvailableOptions({ selectFirstFeed = false, loadIfComplete = true
     sortedCountries.forEach(country => {
         const option = document.createElement('option');
         option.value = country;
-        option.textContent = country.toUpperCase();
+        option.textContent = country === ALL_REGIONS ? 'All Regions' : country.toUpperCase();
         countrySelect.appendChild(option);
     });
     
-    // Restore selection if still valid
-    if (availableCountries.has(currentCountry)) {
-        countrySelect.value = currentCountry;
-    } else {
-        countrySelect.selectedIndex = -1; // Force user to choose if previous not valid
-    }
+    // Keep the previous selection if still valid, otherwise take the first option.
+    countrySelect.value = availableCountries.has(currentCountry) ? currentCountry : (sortedCountries[0] || '');
 
     // 2. Update Media Type (depends on Date + Country)
     const selectedCountry = countrySelect.value;
@@ -268,11 +281,7 @@ function updateAvailableOptions({ selectFirstFeed = false, loadIfComplete = true
         mediaTypeSelect.appendChild(option);
     });
 
-    if (availableMediaTypes.has(currentMediaType)) {
-        mediaTypeSelect.value = currentMediaType;
-    } else {
-        mediaTypeSelect.selectedIndex = -1;
-    }
+    mediaTypeSelect.value = availableMediaTypes.has(currentMediaType) ? currentMediaType : (sortedMediaTypes[0] || '');
 
     // 3. Update Feed (depends on Date + Country + MediaType)
     const selectedMediaType = mediaTypeSelect.value;
@@ -299,10 +308,8 @@ function updateAvailableOptions({ selectFirstFeed = false, loadIfComplete = true
 
     if (selectFirstFeed && sortedFeeds.length > 0) {
         feedSelect.value = sortedFeeds[0];
-    } else if (availableFeeds.has(currentFeed)) {
-        feedSelect.value = currentFeed;
     } else {
-        feedSelect.selectedIndex = -1;
+        feedSelect.value = availableFeeds.has(currentFeed) ? currentFeed : (sortedFeeds[0] || '');
     }
 
     // If we still have a valid selection for everything, load it
@@ -385,7 +392,8 @@ function formatCountryName(country) {
         jp: 'Japan',
         gb: 'United Kingdom',
         de: 'Germany',
-        fr: 'France'
+        fr: 'France',
+        [ALL_REGIONS]: 'All Regions'
     };
     return names[country] || country.toUpperCase();
 }
@@ -452,7 +460,7 @@ function showJsonFileList() {
 
     const filesByYear = new Map();
     filesByDate.forEach((dateFiles, date) => {
-        const year = date === CURATED_SOURCE ? 'Curated' : date.substring(0, 4);
+        const year = LIST_SOURCES.includes(date) ? 'Lists' : date.substring(0, 4);
         if (!filesByYear.has(year)) filesByYear.set(year, []);
         filesByYear.get(year).push([date, dateFiles]);
     });
@@ -770,12 +778,151 @@ async function showAppDetails(appId, basicAppInfo) {
     appModal.style.display = "flex";
 
     const currentCountry = countrySelect.value;
-    const [details, archive] = await Promise.all([
+    const priceMonths = [...(priceMonthsByApp.get(String(appId)) || [])].sort().reverse();
+    const [details, archive, prices] = await Promise.all([
         getAppDetails(appId, currentCountry),
-        getAppArchive(appId)
+        getAppArchive(appId),
+        priceMonths.length > 0 ? getAppPrices(appId, priceMonths[0]) : null
     ]);
 
-    renderModalContent(details, appId, basicAppInfo, archive);
+    renderModalContent(details, appId, basicAppInfo, archive, prices && { ...prices, months: priceMonths });
+}
+
+const appPricesCache = {};
+
+async function getAppPrices(appId, month) {
+    const cacheKey = `${month}:${appId}`;
+    if (!Object.prototype.hasOwnProperty.call(appPricesCache, cacheKey)) {
+        appPricesCache[cacheKey] = Promise.all([
+            fetchJson(dataPath('apps', `prices/${month}/${appId}.json`)),
+            fetchJson(dataPath('apps', `prices/${month}/usd-rates.json`))
+        ]).then(([data, rates]) => ({ month, data, rates })).catch(() => null);
+    }
+    return appPricesCache[cacheKey];
+}
+
+const regionNames = typeof Intl.DisplayNames === 'function'
+    ? new Intl.DisplayNames(['en'], { type: 'region' })
+    : null;
+
+function formatRegion(code) {
+    const upper = String(code).toUpperCase();
+    try {
+        return regionNames?.of(upper) || upper;
+    } catch {
+        return upper;
+    }
+}
+
+// Purchase names in display order: the US storefront's first, then the rest.
+function listPurchaseNames(storefronts) {
+    const entries = Object.entries(storefronts).sort(([left], [right]) => (
+        (left === 'us' ? -1 : right === 'us' ? 1 : 0) || left.localeCompare(right)
+    ));
+    return [...new Set(entries.flatMap(([, value]) => (value.items || []).map(item => item.name)))];
+}
+
+function renderPriceRows(prices, purchaseName) {
+    const storefronts = prices.data.storefronts || {};
+    // usd-rates.json is the exchange API's own file: { date, usd: { cny: 6.7, ... } }.
+    const rates = prices.rates.usd || {};
+    const rateOf = currency => rates[String(currency).toLowerCase()];
+    const toUsd = (item, currency) => (
+        Number.isFinite(item.amount) && rateOf(currency) > 0 ? item.amount / rateOf(currency) : null
+    );
+    const usPrices = (storefronts.us?.items || [])
+        .filter(item => item.name === purchaseName)
+        .map(item => item.amount);
+
+    // Apple often lists several products with the same name and price (separate
+    // subscription groups or product IDs); the data keeps them all, one row is shown.
+    const rows = Object.entries(storefronts).flatMap(([code, value]) => {
+        const byPrice = new Map();
+        for (const item of (value.items || []).filter(item => item.name === purchaseName)) {
+            if (byPrice.has(item.price)) byPrice.get(item.price).count += 1;
+            else byPrice.set(item.price, { code, price: item.price, usd: toUsd(item, value.currency), count: 1 });
+        }
+        return [...byPrice.values()];
+    }).sort((left, right) => (left.usd ?? Infinity) - (right.usd ?? Infinity) || left.code.localeCompare(right.code));
+
+    if (rows.length === 0) return '<div class="price-empty">No storefront lists this purchase.</div>';
+
+    // A name can carry several plans (e.g. monthly and yearly), so each row is
+    // compared with the US price nearest to it.
+    const nearestUsPrice = usd => usPrices
+        .filter(price => price > 0)
+        .sort((left, right) => Math.abs(Math.log(usd / left)) - Math.abs(Math.log(usd / right)))[0];
+    return rows.map(row => {
+        const usReference = row.usd > 0 ? nearestUsPrice(row.usd) : null;
+        const difference = usReference
+            ? Math.round((row.usd / usReference - 1) * 100)
+            : null;
+        const differenceHtml = difference === null || row.code === 'us'
+            ? ''
+            : `<span class="price-diff ${difference < 0 ? 'cheaper' : difference > 0 ? 'pricier' : ''}">${difference > 0 ? '+' : ''}${difference}%</span>`;
+        return `
+            <div class="price-row">
+                <span class="price-region">${escapeHtml(formatRegion(row.code))}</span>
+                <span class="price-local">${escapeHtml(row.price)}${row.count > 1
+                    ? ` <span class="price-count" title="Listed ${row.count} times on the App Store page">×${row.count}</span>`
+                    : ''}</span>
+                <span class="price-usd">${row.usd === null ? '-' : `$${row.usd.toFixed(2)}`}</span>
+                ${differenceHtml}
+            </div>
+        `;
+    }).join('');
+}
+
+function renderPriceSection(prices) {
+    if (!prices?.data?.storefronts) return '';
+    const storefronts = prices.data.storefronts;
+    const names = listPurchaseNames(storefronts);
+    const unavailable = Object.entries(storefronts)
+        .filter(([, value]) => value.available === false)
+        .map(([code]) => formatRegion(code))
+        .sort();
+    const monthOptions = prices.months.map(month => (
+        `<option value="${escapeHtml(month)}"${month === prices.month ? ' selected' : ''}>${escapeHtml(formatDate(month))}</option>`
+    )).join('');
+
+    return `
+        <div class="modal-section price-section">
+            <h3>In-App Purchases by Country</h3>
+            <div class="price-controls">
+                ${names.length > 0 ? `
+                    <select class="price-item-select" aria-label="In-app purchase">
+                        ${names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('')}
+                    </select>
+                ` : ''}
+                ${prices.months.length > 1 ? `<select class="price-month-select" aria-label="Month">${monthOptions}</select>` : ''}
+            </div>
+            <div class="price-rows">
+                ${names.length > 0 ? renderPriceRows(prices, names[0]) : '<div class="price-empty">No in-app purchases listed.</div>'}
+            </div>
+            <p class="price-note">
+                Prices as listed on each App Store page (${escapeHtml(formatDate(prices.month))}), sorted by US dollar value
+                at rates of ${escapeHtml(prices.rates.date || '-')}. Apple shows at most ten purchases per storefront and
+                does not label billing periods, so a name can appear more than once.
+            </p>
+            ${unavailable.length > 0 ? `<p class="price-note">Not available in ${unavailable.length} storefront${unavailable.length === 1 ? '' : 's'}: ${escapeHtml(unavailable.join(', '))}.</p>` : ''}
+        </div>
+    `;
+}
+
+function setupPriceSection(section, prices, appId) {
+    const itemSelect = section.querySelector('.price-item-select');
+    itemSelect?.addEventListener('change', () => {
+        section.querySelector('.price-rows').innerHTML = renderPriceRows(prices, itemSelect.value);
+    });
+
+    section.querySelector('.price-month-select')?.addEventListener('change', async event => {
+        const next = await getAppPrices(appId, event.target.value);
+        if (!next) return;
+        const nextPrices = { ...next, months: prices.months };
+        section.outerHTML = renderPriceSection(nextPrices);
+        const replaced = modalBody.querySelector('.price-section');
+        if (replaced) setupPriceSection(replaced, nextPrices, appId);
+    });
 }
 
 function formatAppDate(dateString) {
@@ -870,7 +1017,7 @@ function renderInfoRows(rows) {
         .join('');
 }
 
-function renderModalContent(details, appId, basicAppInfo, archive) {
+function renderModalContent(details, appId, basicAppInfo, archive, prices = null) {
     const app = details || {};
     const title = app.trackName || app.collectionName || basicAppInfo.name || 'Untitled';
     const subtitle = app.artistName || app.sellerName || basicAppInfo.artistName || '';
@@ -972,6 +1119,8 @@ function renderModalContent(details, appId, basicAppInfo, archive) {
             ${renderInfoRows(informationRows)}
         </div>
 
+        ${renderPriceSection(prices)}
+
         ${archiveHtml}
     `;
 
@@ -979,6 +1128,9 @@ function renderModalContent(details, appId, basicAppInfo, archive) {
         modalBody.querySelector('.modal-icon'),
         [versionArtworkUrl]
     );
+
+    const priceSection = modalBody.querySelector('.price-section');
+    if (priceSection) setupPriceSection(priceSection, prices, appId);
 
     if (archiveHtml) {
         setupArchiveTabs(modalBody.querySelector('.archive-section'));

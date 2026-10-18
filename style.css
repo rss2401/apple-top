@@ -1187,3 +1187,81 @@ main {
     overflow: hidden;
     text-overflow: ellipsis;
 }
+
+/* In-App Purchases by Country Modal Section */
+.price-controls {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.price-controls select {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.price-rows {
+    max-height: 360px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.price-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto 80px 56px;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--info-border);
+    font-size: 14px;
+}
+
+.price-region {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.price-local {
+    color: var(--text-secondary);
+    text-align: right;
+}
+
+.price-usd {
+    font-weight: 600;
+    text-align: right;
+}
+
+.price-count {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.price-diff {
+    font-size: 12px;
+    font-weight: 600;
+    text-align: right;
+    color: var(--text-secondary);
+}
+
+.price-diff.cheaper {
+    color: #30a46c;
+}
+
+.price-diff.pricier {
+    color: #e5484d;
+}
+
+.price-empty,
+.price-note {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.price-note {
+    margin: 12px 0 0;
+    line-height: 1.5;
+}

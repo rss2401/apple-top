@@ -50,6 +50,7 @@ node ../apple-top/scripts/downloader.mjs all --media podcasts
 | `details` | Download iTunes Lookup JSON into `details/` |
 | `media` | Download artwork into `logos/`, rebuild `archives/` and `rankings.json` |
 | `lists` | Refresh curated lists in `lists/` (apps repository only) |
+| `prices` | Save in-app purchase prices into `prices/YYYYMM/` (see below) |
 | `archives` | Rebuild `archives/` from `rankings/` |
 | `index` | Rebuild `rankings.json` |
 | `all` | `rank`, `details`, and `media` in order (default) |
@@ -63,6 +64,8 @@ node ../apple-top/scripts/downloader.mjs all --media podcasts
 | `--generate-markdown` | Off | Generate `.md` summaries next to ranking files |
 | `--limit <number>` | `100` | Results requested from each feed |
 | `--countries <list>` | `us cn jp gb de fr` | Countries, comma or space separated |
+| `--storefronts <list>` | See below | App Store storefronts for `prices` |
+| `--all-storefronts` | Off | `prices` checks all 175 storefronts |
 
 Behaviour worth knowing:
 
@@ -77,6 +80,17 @@ Behaviour worth knowing:
 - **Failures**: requests time out and retry; writes go through temporary files. A missing feed
   (404) is skipped, other unrecovered failures fail the stage so incomplete data is not
   committed.
+
+- **Prices**: price lists are the files in `lists/` without a `<country>_<media>_` prefix (e.g.
+  `lists/ai-subs.json`, ranking-feed format). For every app in them, `prices` reads its App Store page
+  (`apps.apple.com/<storefront>/app/id<id>`), about 1.5 s apart. The first run of an app, and
+  any run with `--all-storefronts`, checks all 175 storefronts; later runs only revisit the
+  storefronts where the latest snapshot found the app. It writes `prices/YYYYMM/<id>.json` plus `prices/YYYYMM/usd-rates.json`, the unmodified
+  USD rates file of [fawazahmed0/exchange-api](https://github.com/fawazahmed0/exchange-api) (CC0). Each item keeps
+  the listed price string and a parsed `amount`; a 404 is stored as `available: false`, and a
+  page served for another storefront is a failure. Apple lists at most ten purchases per page and
+  does not label subscriptions or billing periods. The workflow commits prices separately and
+  skips them, without failing the run, when any page fails.
 
 Tests: `node --test scripts/downloader.test.mjs` (they only use temporary directories).
 

@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: false
+      all_storefronts:
+        description: 'Price every app in all storefronts instead of where it was last available'
+        required: false
+        type: boolean
+        default: false
       tool_ref:
         description: 'Branch, tag, or commit of rss2401/apple-top that provides the downloader'
         required: false
@@ -122,6 +127,38 @@ jobs:
           else
             echo "No detail changes to commit."
           fi
+
+      # Only the apps repository has lists/; prices does nothing without a price
+      # list (lists/<name>.json). A failed price run is not committed but does
+      # not hold back stage 3.
+      - name: Stage 2 - Download in-app prices
+        id: prices
+        if: hashFiles('lists/*.json') != ''
+        continue-on-error: true
+        shell: bash
+        run: |
+          args=(prices --month "$ARCHIVE_MONTH")
+          if [[ "${{ inputs.all_storefronts }}" == "true" ]]; then args+=(--all-storefronts); fi
+          node "$TOOL" "${args[@]}"
+
+      - name: Stage 2 - Commit prices checkpoint
+        if: steps.prices.outcome == 'success'
+        shell: bash
+        run: |
+          if [[ -d prices ]]; then git add -- prices; fi
+          if ! git diff --cached --quiet; then
+            git commit -m "Update in-app prices $ARCHIVE_MONTH"
+            git push
+          else
+            echo "No price changes to commit."
+          fi
+
+      - name: Stage 2 - Discard incomplete prices
+        if: steps.prices.outcome == 'failure'
+        shell: bash
+        run: |
+          git clean -fdq -- prices
+          git checkout -q -- prices 2>/dev/null || true
 
       - name: Stage 3 - Download media and publish index
         shell: bash

@@ -13,6 +13,7 @@ let DETAILS_DIR;
 let LOGOS_DIR;
 let ARCHIVES_DIR;
 let LISTS_DIR;
+let PRICES_DIR;
 let RANKINGS_INDEX;
 
 export function setDataRoot(root) {
@@ -22,6 +23,7 @@ export function setDataRoot(root) {
     LOGOS_DIR = path.join(ROOT_DIR, 'logos');
     ARCHIVES_DIR = path.join(ROOT_DIR, 'archives');
     LISTS_DIR = path.join(ROOT_DIR, 'lists');
+    PRICES_DIR = path.join(ROOT_DIR, 'prices');
     RANKINGS_INDEX = path.join(ROOT_DIR, 'rankings.json');
 }
 
@@ -35,8 +37,32 @@ const DETAIL_BATCH_SIZE = 25;
 const ARTWORK_SIZE_TOKEN = '600x600bb';
 const LOOKUP_MIN_INTERVAL_MS = 3_250;
 const LOOKUP_RATE_LIMIT_DELAYS_MS = [30_000, 60_000];
+const PRICE_PAGE_MIN_INTERVAL_MS = 1_500;
 
 const COUNTRIES = ['us', 'cn', 'jp', 'gb', 'de', 'fr'];
+
+// Every App Store storefront (https://support.apple.com/en-us/118205), used by
+// the prices command. Each page states its own currency, so only codes are kept.
+export const STOREFRONTS = [
+    'ae', 'af', 'ag', 'ai', 'al', 'am', 'ao', 'ar', 'at', 'au', 'az', 'ba', 'bb', 'be', 'bf',
+    'bg', 'bh', 'bj', 'bm', 'bn', 'bo', 'br', 'bs', 'bt', 'bw', 'by', 'bz', 'ca', 'cd', 'cg',
+    'ch', 'ci', 'cl', 'cm', 'cn', 'co', 'cr', 'cv', 'cy', 'cz', 'de', 'dk', 'dm', 'do', 'dz',
+    'ec', 'ee', 'eg', 'es', 'fi', 'fj', 'fm', 'fr', 'ga', 'gb', 'gd', 'ge', 'gh', 'gm', 'gr',
+    'gt', 'gw', 'gy', 'hk', 'hn', 'hr', 'hu', 'id', 'ie', 'il', 'in', 'iq', 'is', 'it', 'jm',
+    'jo', 'jp', 'ke', 'kg', 'kh', 'kn', 'kr', 'kw', 'ky', 'kz', 'la', 'lb', 'lc', 'lk', 'lr',
+    'lt', 'lu', 'lv', 'ly', 'ma', 'md', 'me', 'mg', 'mk', 'ml', 'mm', 'mn', 'mo', 'mr', 'ms',
+    'mt', 'mu', 'mv', 'mw', 'mx', 'my', 'mz', 'na', 'ne', 'ng', 'ni', 'nl', 'no', 'np', 'nr',
+    'nz', 'om', 'pa', 'pe', 'pg', 'ph', 'pk', 'pl', 'pt', 'pw', 'py', 'qa', 'ro', 'rs', 'ru',
+    'rw', 'sa', 'sb', 'sc', 'se', 'sg', 'si', 'sk', 'sl', 'sn', 'sr', 'st', 'sv', 'sz', 'tc',
+    'td', 'th', 'tj', 'tm', 'tn', 'to', 'tr', 'tt', 'tw', 'tz', 'ua', 'ug', 'us', 'uy', 'uz',
+    'vc', 've', 'vg', 'vn', 'vu', 'xk', 'ye', 'za', 'zm', 'zw'
+];
+
+// USD-based daily rates (CC0, no key): https://github.com/fawazahmed0/exchange-api
+const USD_RATE_SOURCES = [
+    'https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json',
+    'https://latest.currency-api.pages.dev/v1/currencies/usd.json'
+];
 const FEED_CONFIGS = [
     { mediaType: 'apps', feedType: 'top-free', resource: 'apps', fileSuffix: 'top-free' },
     { mediaType: 'apps', feedType: 'top-paid', resource: 'apps', fileSuffix: 'top-paid' },
@@ -70,6 +96,14 @@ export function parseRankingFileName(fileName) {
     const parts = fileName.replace(/\.json$/i, '').split('_');
     if (parts.length < 3) return null;
     return { country: parts[0], mediaType: parts[1], feed: parts.slice(2).join('_') };
+}
+
+/**
+ * Price lists sit in lists/ next to the curated lists but have no
+ * country_media_ prefix (e.g. "ai-subs.json"): they are priced in every storefront.
+ */
+export function isPriceListFile(fileName) {
+    return fileName.endsWith('.json') && !parseRankingFileName(fileName);
 }
 
 function isSelectedRankingFile(fileName, countries, mediaTypes) {
@@ -124,6 +158,8 @@ Commands:
   details                  Download lookup JSON into details/
   media                    Download artwork, build archives, and publish the index
   lists                    Download details and artwork only for curated lists
+  prices                   Save in-app purchase prices of the price lists' apps
+                           (lists/<name>.json) into prices/YYYYMM/, plus USD rates
   archives                 Rebuild archives/ from rankings/
   index                    Rebuild rankings.json
   all                      Run rank, details, and media in order (default)
@@ -136,6 +172,9 @@ Options:
   --generate-markdown      Generate Markdown summaries for ranking files
   --limit <number>         Results requested from each feed (default: 100)
   --countries <list>       Countries separated by commas or spaces (default: all)
+  --storefronts <list>     Storefronts for the prices command (default: those where each
+                           app was available in its latest snapshot; all for new apps)
+  --all-storefronts        Price every app in all ${STOREFRONTS.length} storefronts
   -h, --help               Show this help
 `);
 }
@@ -165,6 +204,22 @@ function parseCountries(value) {
         );
     }
     return [...new Set(countries)];
+}
+
+function parseStorefronts(value) {
+    const storefronts = String(value || '')
+        .toLowerCase()
+        .split(/[\s,]+/)
+        .filter(Boolean);
+    const invalid = storefronts.filter(storefront => !STOREFRONTS.includes(storefront));
+
+    if (storefronts.length === 0) {
+        throw new Error('--storefronts must include at least one storefront code.');
+    }
+    if (invalid.length > 0) {
+        throw new Error(`Unsupported storefronts: ${[...new Set(invalid)].join(', ')}.`);
+    }
+    return [...new Set(storefronts)];
 }
 
 function parseMediaTypes(value) {
@@ -200,7 +255,7 @@ export function currentUtcMonth(date = new Date()) {
 
 export function parseArguments(argv) {
     const args = [...argv];
-    const commands = new Set(['rank', 'details', 'media', 'lists', 'archives', 'index', 'all']);
+    const commands = new Set(['rank', 'details', 'media', 'lists', 'prices', 'archives', 'index', 'all']);
     let command = 'all';
 
     if (args[0] && !args[0].startsWith('-')) {
@@ -214,6 +269,8 @@ export function parseArguments(argv) {
         generateMarkdown: false,
         limit: 100,
         countries: [...COUNTRIES],
+        storefronts: null,
+        allStorefronts: false,
         mediaTypes: [...MEDIA_TYPES],
         month: currentUtcMonth(),
         root: process.cwd(),
@@ -252,6 +309,14 @@ export function parseArguments(argv) {
             options.countries = parseCountries(result.value);
         } else if (argument.startsWith('--countries=')) {
             options.countries = parseCountries(argument.slice('--countries='.length));
+        } else if (argument === '--all-storefronts') {
+            options.allStorefronts = true;
+        } else if (argument === '--storefronts') {
+            const result = readListValues(args, index);
+            index = result.index;
+            options.storefronts = parseStorefronts(result.value);
+        } else if (argument.startsWith('--storefronts=')) {
+            options.storefronts = parseStorefronts(argument.slice('--storefronts='.length));
         } else if (argument === '--help' || argument === '-h') {
             options.help = true;
         } else {
@@ -562,10 +627,11 @@ export function collectMediaEntries(rankingResults, { refreshMonth } = {}) {
     return [...entries.values()];
 }
 
-// Curated lists exist only in the apps data repository; elsewhere lists/ is absent.
+// Curated lists and price lists exist only in the apps data repository; elsewhere
+// lists/ is absent. Price lists have no country and are looked up in the us store.
 async function loadCuratedLists(countries = COUNTRIES) {
     const files = (await readdir(LISTS_DIR).catch(() => []))
-        .filter(fileName => fileName.endsWith('-apps.json'))
+        .filter(fileName => fileName.endsWith('-apps.json') || isPriceListFile(fileName))
         .sort();
     const lists = [];
 
@@ -793,6 +859,16 @@ async function fetchDetailBatch(entries, waitForRequestSlot) {
     const country = entries[0].country;
     const ids = entries.map(entry => entry.id).join(',');
     const url = `https://itunes.apple.com/lookup?id=${ids}&country=${encodeURIComponent(country)}`;
+    return requestWithRateLimitBackoff(
+        `details:${country}`,
+        waitForRequestSlot,
+        () => fetchResource(url, { responseType: 'json', attempts: 1 })
+    );
+}
+
+// Throttled request with up to three attempts; 403/429 from Apple wait longer
+// (LOOKUP_RATE_LIMIT_DELAYS_MS) than other transient failures.
+async function requestWithRateLimitBackoff(label, waitForRequestSlot, request) {
     let retryDelayMs = 0;
     let lastError;
 
@@ -801,7 +877,7 @@ async function fetchDetailBatch(entries, waitForRequestSlot) {
         await waitForRequestSlot();
 
         try {
-            return await fetchResource(url, { responseType: 'json', attempts: 1 });
+            return await request();
         } catch (error) {
             lastError = error;
             const rateLimited = error instanceof HttpError
@@ -818,7 +894,7 @@ async function fetchDetailBatch(entries, waitForRequestSlot) {
                     ? LOOKUP_RATE_LIMIT_DELAYS_MS[attempt - 1]
                     : (2 ** (attempt - 1)) * 1000);
             console.warn(
-                `[details:${country}] batch request failed (${attempt}/3); `
+                `[${label}] request failed (${attempt}/3); `
                 + `retrying in ${Math.ceil(retryDelayMs / 1000)}s: ${error.message}`
             );
         }
@@ -1095,7 +1171,8 @@ export async function rebuildRankingsIndex() {
     const isJson = file => file.endsWith('.json');
     const files = [
         ...await listFiles(RANKINGS_DIR, isJson),
-        ...await listFiles(LISTS_DIR, isJson).catch(() => [])
+        ...await listFiles(LISTS_DIR, isJson).catch(() => []),
+        ...await listFiles(PRICES_DIR, isJson).catch(() => [])
     ];
     const index = await Promise.all(files.map(async filePath => {
         const fileStat = await stat(filePath);
@@ -1269,6 +1346,218 @@ export async function runListsStage(options) {
     console.log(`[lists] Complete: ${lists.length} list(s); ${mediaItems.length} app(s); index updated.`);
 }
 
+/**
+ * Reads a localized App Store price such as "$19.99", "¥9,900", "₺5.299,99" or
+ * "1 299,00 kr". A final "." or "," followed by one or two digits is the
+ * decimal separator; every other separator groups thousands.
+ */
+export function parsePriceAmount(text) {
+    const digits = String(text || '').replace(/[^\d.,]/g, '');
+    if (!/\d/.test(digits)) return null;
+    const decimal = digits.match(/^(.*)[.,](\d{1,2})$/);
+    const whole = (decimal ? decimal[1] : digits).replace(/[.,]/g, '') || '0';
+    return Number(decimal ? `${whole}.${decimal[2]}` : whole);
+}
+
+/**
+ * Extracts the storefront, the price currency, and the in-app purchase list
+ * from an apps.apple.com product page. The list is the information shelf's
+ * annotation made of "textPair" items (its title is localized, so it is not
+ * matched); Apple shows at most ten purchases, without telling subscriptions
+ * and one-time purchases apart. Returns null when the page carries no data.
+ */
+export function parseAppStorePage(html) {
+    const serverData = String(html).match(
+        /<script[^>]*id="serialized-server-data"[^>]*>([\s\S]*?)<\/script>/
+    );
+    if (!serverData) return null;
+
+    let data;
+    try {
+        data = JSON.parse(serverData[1]);
+    } catch {
+        return null;
+    }
+
+    let storefront = '';
+    let items = null;
+    const visit = node => {
+        if (Array.isArray(node)) {
+            node.forEach(visit);
+            return;
+        }
+        if (!node || typeof node !== 'object') return;
+        if (!storefront && node.$kind === 'ProductPageIntent' && node.storefront) {
+            storefront = String(node.storefront);
+        }
+        if (!items && node.$kind === 'Annotation' && Array.isArray(node.items)
+            && node.items.some(item => item?.$kind === 'textPair')) {
+            items = node.items
+                .filter(item => item?.$kind === 'textPair')
+                .map(item => ({
+                    name: String(item.leadingText || ''),
+                    price: String(item.trailingText || ''),
+                    amount: parsePriceAmount(item.trailingText)
+                }));
+        }
+        Object.values(node).forEach(visit);
+    };
+    visit(data);
+
+    let currency = '';
+    const ldJson = String(html).match(
+        /<script[^>]*id="?software-application"?[^>]*>([\s\S]*?)<\/script>/
+    );
+    if (ldJson) {
+        try {
+            const offers = [JSON.parse(ldJson[1]).offers].flat();
+            currency = String(offers.find(offer => offer?.priceCurrency)?.priceCurrency || '');
+        } catch {
+            // Without a currency the prices cannot be converted; reported by the caller.
+        }
+    }
+
+    return { storefront, currency, items: items || [] };
+}
+
+/** Picks rates (units per US dollar) for the given currency codes. */
+// The rates file is saved unchanged; it only has to cover every listed currency.
+export function checkUsdRates(rateData, currencies) {
+    for (const currency of currencies) {
+        const rate = Number(rateData?.usd?.[currency.toLowerCase()]);
+        if (!(rate > 0)) throw new Error(`no USD rate for ${currency}`);
+    }
+    return rateData;
+}
+
+async function fetchUsdRates(currencies) {
+    for (const url of USD_RATE_SOURCES) {
+        try {
+            const data = await fetchResource(url, { responseType: 'json' });
+            return checkUsdRates(data, currencies);
+        } catch (error) {
+            console.warn(`[prices] exchange rates unavailable from ${url}: ${error.message}`);
+        }
+    }
+    throw new Error('No exchange-rate source is available.');
+}
+
+async function fetchStorefrontPrices(id, storefront, waitForRequestSlot) {
+    const url = `https://apps.apple.com/${storefront}/app/id${id}`;
+    try {
+        return await requestWithRateLimitBackoff(`prices:${storefront}`, waitForRequestSlot, async () => {
+            const html = (await fetchResource(url, { responseType: 'text', attempts: 1 })).toString('utf8');
+            const page = parseAppStorePage(html);
+            if (!page) throw new Error('page has no product data');
+            // Apple redirects requests it will not serve (for example by
+            // client location) to another storefront; never store those prices.
+            if (page.storefront !== storefront) {
+                throw new Error(`served storefront "${page.storefront}" instead`);
+            }
+            if (page.items.length > 0 && !page.currency) throw new Error('page has no price currency');
+            return { currency: page.currency, items: page.items };
+        });
+    } catch (error) {
+        if (error instanceof HttpError && error.status === 404) return { available: false };
+        throw error;
+    }
+}
+
+// Apps of every price list (see isPriceListFile).
+async function loadPriceListApps() {
+    const apps = new Map();
+    const files = (await readdir(LISTS_DIR).catch(() => [])).filter(isPriceListFile).sort();
+    for (const fileName of files) {
+        const list = await readJson(path.join(LISTS_DIR, fileName));
+        for (const item of list.feed?.results || []) {
+            const id = String(item.id || '');
+            if (id && !apps.has(id)) apps.set(id, { id, name: item.name || '' });
+        }
+    }
+    return [...apps.values()];
+}
+
+// Newest snapshot of an app up to the given month (the month itself included).
+async function readLatestPriceSnapshot(id, month) {
+    const months = (await readdir(PRICES_DIR).catch(() => []))
+        .filter(name => ARCHIVE_MONTH_PATTERN.test(name) && name <= month)
+        .sort()
+        .reverse();
+    for (const name of months) {
+        const snapshot = await readJson(path.join(PRICES_DIR, name, `${id}.json`)).catch(() => null);
+        if (snapshot?.storefronts) return snapshot;
+    }
+    return null;
+}
+
+/**
+ * Storefronts to request for one app: an explicit --storefronts list, every
+ * storefront with --all-storefronts or for an app without a snapshot, and
+ * otherwise only the storefronts where the latest snapshot found the app.
+ */
+export function selectPriceStorefronts(latestSnapshot, { storefronts = null, allStorefronts = false } = {}) {
+    if (storefronts) return storefronts;
+    if (allStorefronts || !latestSnapshot?.storefronts) return [...STOREFRONTS];
+    return Object.entries(latestSnapshot.storefronts)
+        .filter(([code, value]) => value.available !== false && STOREFRONTS.includes(code))
+        .map(([code]) => code)
+        .sort();
+}
+
+export async function runPricesStage(options) {
+    const apps = await loadPriceListApps();
+    if (apps.length === 0) {
+        console.log('[prices] No price list in lists/; nothing to do.');
+        return;
+    }
+
+    console.log(`[prices] ${apps.length} app(s)`);
+    const monthDir = path.join(PRICES_DIR, options.month);
+    const waitForRequestSlot = createRequestThrottle(PRICE_PAGE_MIN_INTERVAL_MS);
+    const currencies = new Set(['USD']);
+    const failures = [];
+
+    for (const app of apps) {
+        const filePath = path.join(monthDir, `${app.id}.json`);
+        const selected = selectPriceStorefronts(await readLatestPriceSnapshot(app.id, options.month), options);
+        if (selected.length === 0) {
+            console.log(`[prices] skipped ${app.id} ${app.name}: no storefront had it last time`);
+            continue;
+        }
+        // Storefronts not requested this time keep the month's earlier values.
+        const storefronts = { ...(await readJson(filePath).catch(() => null))?.storefronts };
+
+        for (const storefront of selected) {
+            try {
+                storefronts[storefront] = await fetchStorefrontPrices(app.id, storefront, waitForRequestSlot);
+            } catch (error) {
+                console.warn(`[prices] failed ${app.id} ${storefront}: ${error.message}`);
+                failures.push(`${app.id}/${storefront}`);
+            }
+        }
+
+        const sorted = Object.fromEntries(Object.keys(storefronts).sort().map(key => [key, storefronts[key]]));
+        Object.values(sorted).forEach(value => value.currency && currencies.add(value.currency));
+        await atomicWrite(filePath, `${JSON.stringify({
+            id: app.id,
+            name: app.name,
+            month: options.month,
+            fetchedAt: new Date().toISOString(),
+            storefronts: sorted
+        }, null, 2)}\n`);
+        const available = Object.values(sorted).filter(value => value.available !== false).length;
+        console.log(`[prices] saved ${app.id} ${app.name}: available in ${available}/${Object.keys(sorted).length}`);
+    }
+
+    const rates = await fetchUsdRates([...currencies].sort());
+    await atomicWrite(path.join(monthDir, 'usd-rates.json'), `${JSON.stringify(rates, null, 2)}\n`);
+    console.log(`[prices] saved usd-rates.json (${rates.date}, ${Object.keys(rates.usd).length} currencies)`);
+
+    if (failures.length > 0) {
+        throw new Error(`Prices stage incomplete: ${failures.length} page(s) failed.`);
+    }
+}
+
 export async function main(argv = process.argv.slice(2)) {
     const options = parseArguments(argv);
     if (options.help) {
@@ -1300,6 +1589,9 @@ export async function main(argv = process.argv.slice(2)) {
     }
     if (options.command === 'lists') {
         await runListsStage(options);
+    }
+    if (options.command === 'prices') {
+        await runPricesStage(options);
     }
     console.log('Done.');
 }
