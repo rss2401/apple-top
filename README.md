@@ -47,6 +47,26 @@ Distinct amounts sharing a purchase name stay separate, and ambiguous names are 
 comparisons because Apple may not identify billing periods. There is no separate site
 or page layout for subscriptions.
 
+### Shareable links
+
+The URL follows the current filters and open item. Refreshing a link or using the
+browser's Back/Forward buttons restores that view.
+
+- `?media=books` opens Books; the other media values are `apps`, `music`, `podcasts`,
+  and `audio-books`. Singular aliases such as `media=book` also work.
+- `date=202610`, `country=us`, and `feed=top-paid` select an archive, region, and
+  category. Missing or unavailable combinations fall back to available data for
+  the requested media type.
+- `source=curated` opens curated lists; `source=subscriptions` opens subscriptions.
+- `#6474233312` opens that item's detail or subscription view, including items
+  outside the selected ranking. `view=details` or `view=subscriptions` selects
+  the modal view. Closing the modal clears its hash.
+- Subscription links retain `month`, `purchase`, and `currency` selections.
+
+For example, `?media=apps&source=subscriptions&country=cn&feed=ai-subs#6474233312`
+opens Kimi subscriptions in China. Data repositories link to their respective
+`?media=...` view of the website from their GitHub Homepage setting.
+
 Each data repository contains a short `.github/workflows/update.yml` that calls
 [`update-data.yml`](.github/workflows/update-data.yml) here with its media type. The shared
 workflow runs inside the data repository: it checks out this repository into `_tool/`, runs

@@ -41,7 +41,7 @@ jobs:
       - name: Collect website files
         run: |
           mkdir _site
-          cp index.html script.js style.css pricing-data.mjs list-files.mjs _site/
+          cp index.html script.js style.css pricing-data.mjs list-files.mjs page-route.mjs _site/
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact

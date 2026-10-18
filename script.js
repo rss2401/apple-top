@@ -1,5 +1,6 @@
 import { comparisonRows, localPurchaseItems, localStorefront, purchaseNames, selectLocalizedDetail } from './pricing-data.mjs';
 import { parseListFileName } from './list-files.mjs';
+import { buildPageUrl, parsePageRoute, resolvePageSelection } from './page-route.mjs';
 
 const dateSelect = document.getElementById('dateSelect');
 const countrySelect = document.getElementById('countrySelect');
@@ -17,6 +18,11 @@ let availableDates = new Set();
 let availableCountries = new Set();
 let availableMediaTypes = new Set();
 let availableFeeds = new Set();
+let indexesReady = false;
+let currentApps = [];
+let activeItemRoute = null;
+let lastRoutedHref = '';
+let locationRequestSerial = 0;
 
 // Source value used for files under lists/ (manually curated app collections).
 const CURATED_SOURCE = 'curated';
@@ -117,13 +123,49 @@ systemThemePreference.addEventListener('change', event => {
 
 updateThemeToggle();
 
-// Close modal events
-closeModalBtn.onclick = () => appModal.style.display = "none";
-window.onclick = (event) => {
-    if (event.target == appModal) {
-        appModal.style.display = "none";
-    }
+let modalReturnFocus = null;
+
+function openModal() {
+    if (appModal.style.display !== 'flex') modalReturnFocus = document.activeElement;
+    appModal.style.display = 'flex';
+    document.body.classList.add('modal-open');
+    modalBody.scrollTop = 0;
+    closeModalBtn.focus({ preventScroll: true });
 }
+
+function closeModal({ syncUrl = true } = {}) {
+    ++detailRequestSerial;
+    appModal.style.display = 'none';
+    document.body.classList.remove('modal-open');
+    if (modalReturnFocus?.isConnected) modalReturnFocus.focus({ preventScroll: true });
+    modalReturnFocus = null;
+    activeItemRoute = null;
+    if (syncUrl && indexesReady) syncPageUrl({ replace: true });
+}
+
+closeModalBtn.addEventListener('click', () => closeModal());
+appModal.addEventListener('click', event => {
+    if (event.target === appModal) closeModal();
+});
+document.addEventListener('keydown', event => {
+    if (appModal.style.display !== 'flex') return;
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        closeModal();
+    } else if (event.key === 'Tab') {
+        const controls = [...appModal.querySelectorAll('button, a[href], select, [tabindex="0"]')]
+            .filter(element => !element.disabled && element.getClientRects().length);
+        const first = controls[0];
+        const last = controls.at(-1);
+        if (event.shiftKey && (document.activeElement === first || !appModal.contains(document.activeElement))) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && (document.activeElement === last || !appModal.contains(document.activeElement))) {
+            event.preventDefault();
+            first.focus();
+        }
+    }
+});
 
 function fetchJson(path) {
     return fetch(path).then(response => {
@@ -150,23 +192,72 @@ async function loadAllIndexes() {
 }
 
 loadAllIndexes()
-    .then(files => {
+    .then(async files => {
         allFiles = files;
         processFiles();
         populateDropdowns();
         jsonListButton.disabled = !allFiles.some(file => file.parsed);
         
-        // Auto-select the most recent archive, excluding list sources.
-        const newestDate = Array.from(availableDates).filter(d => !LIST_SOURCES.includes(d)).sort().reverse()[0];
-        if (newestDate) {
-            dateSelect.value = newestDate;
-            updateAvailableOptions(); // selects the first region, media type and feed, then loads
-        }
+        indexesReady = true;
+        await applyLocationRoute();
     })
     .catch(err => {
         appGrid.innerHTML = `<div class="error">Unable to load data.<br>Ensure the apple-top-&lt;media&gt; data sites are published next to this site.</div>`;
         console.error(err);
     });
+
+function syncPageUrl({ replace = false, item = activeItemRoute } = {}) {
+    const url = buildPageUrl(window.location.href, {
+        date: dateSelect.value, country: countrySelect.value,
+        mediaType: selectedMediaType(), feed: feedSelect.value, ...item
+    });
+    lastRoutedHref = url.href;
+    if (url.href !== window.location.href) window.history[replace ? 'replaceState' : 'pushState'](null, '', url);
+}
+
+async function applyLocationRoute() {
+    if (!indexesReady || window.location.href === lastRoutedHref) return;
+    lastRoutedHref = window.location.href;
+    const request = ++locationRequestSerial;
+    const route = parsePageRoute(window.location.href);
+    const selection = resolvePageSelection(allFiles.filter(file => file.parsed), route);
+    if (!selection) return;
+    closeModal({ syncUrl: false });
+    dateSelect.value = selection.date;
+    updateAvailableOptions({ loadIfComplete: false });
+    countrySelect.value = selection.country;
+    updateAvailableOptions({ loadIfComplete: false });
+    mediaTypeSelect.value = selection.mediaType;
+    updateAvailableOptions({ loadIfComplete: false });
+    feedSelect.value = selection.feed;
+    const view = route.view || (selection.date === PRICE_LIST_SOURCE ? 'subscriptions' : 'details');
+    const item = route.appId ? { appId: route.appId, view, comparison: route.comparison } : null;
+    syncPageUrl({ replace: true, item });
+    const routedHref = window.location.href;
+    await loadRankings({ syncUrl: false });
+    if (request !== locationRequestSerial || window.location.href !== routedHref || !route.appId) return;
+    let basic = currentApps.find(app => String(app.id) === route.appId);
+    if (!basic) {
+        const details = await getAppDetails(route.appId, selection.country, selection.mediaType);
+        basic = {
+            id: route.appId, name: details?.trackName || details?.collectionName || `Item ${route.appId}`,
+            artistName: details?.artistName || details?.sellerName || '',
+            artworkUrl100: details?.artworkUrl100 || details?.artworkUrl60 || '',
+            url: details?.trackViewUrl || details?.collectionViewUrl || '',
+            ...(selection.mediaType === 'apps' ? { kind: 'apps' } : {})
+        };
+    }
+    if (request !== locationRequestSerial || window.location.href !== routedHref) return;
+    const card = document.getElementById(`app-${route.appId}`);
+    card?.scrollIntoView({ block: 'nearest' });
+    card?.focus({ preventScroll: true });
+    const navigation = { ...selection, comparison: route.comparison, syncUrl: false };
+    if (view === 'subscriptions' && selection.mediaType === 'apps') await showSubscriptionDetails(basic, navigation);
+    else await showAppDetails(route.appId, basic, navigation);
+}
+
+window.addEventListener('popstate', applyLocationRoute);
+window.addEventListener('hashchange', applyLocationRoute);
 
 function processFiles() {
     allFiles.forEach(file => {
@@ -550,7 +641,8 @@ function showJsonFileList() {
         });
     });
     appModal.classList.add('json-index-modal');
-    appModal.style.display = 'flex';
+    ++detailRequestSerial;
+    openModal();
 
     const dateNav = modalBody.querySelector('.json-date-nav');
     const updateDateAnchorOffset = () => {
@@ -558,7 +650,11 @@ function showJsonFileList() {
     };
     updateDateAnchorOffset();
     modalBody.querySelectorAll('.json-date-link').forEach(link => {
-        link.addEventListener('click', updateDateAnchorOffset);
+        link.addEventListener('click', event => {
+            event.preventDefault();
+            updateDateAnchorOffset();
+            document.getElementById(link.getAttribute('href').slice(1))?.scrollIntoView({ block: 'start' });
+        });
     });
 }
 
@@ -573,12 +669,12 @@ function selectRankingFile({ date, country, media, feed }) {
     updateAvailableOptions({ loadIfComplete: false });
 
     feedSelect.value = feed;
-    appModal.style.display = 'none';
+    closeModal({ syncUrl: false });
     loadRankings();
 }
 
 let rankingRequestSerial = 0;
-function loadRankings() {
+async function loadRankings({ syncUrl = true } = {}) {
     const request = ++rankingRequestSerial;
     const date = dateSelect.value;
     const country = countrySelect.value;
@@ -586,6 +682,13 @@ function loadRankings() {
     const feed = feedSelect.value;
 
     if (!date || !country || !mediaType || !feed) return;
+
+    if (syncUrl) {
+        ++locationRequestSerial;
+        closeModal({ syncUrl: false });
+        syncPageUrl();
+    }
+    currentApps = [];
 
     appGrid.innerHTML = '<div class="loading">Loading charts...</div>';
 
@@ -604,11 +707,11 @@ function loadRankings() {
 
     const fetchPath = dataPath(file.SourceMedia, file.RelativePath);
 
-    fetch(fetchPath)
-        .then(res => res.json())
+    return fetchJson(fetchPath)
         .then(data => {
             if (request !== rankingRequestSerial) return;
             if (data.feed && data.feed.results) {
+                currentApps = data.feed.results;
                 subTitle.textContent = data.feed.title || '';
                 if (date === PRICE_LIST_SOURCE) renderSubscriptionApps(data.feed.results);
                 else renderApps(data.feed.results);
@@ -647,7 +750,14 @@ function renderApps(apps) {
     apps.forEach((app, index) => {
         const item = document.createElement('div');
         item.className = 'app-item';
+        item.id = `app-${app.id}`;
+        item.tabIndex = 0;
+        item.setAttribute('role', 'button');
+        item.setAttribute('aria-label', `View details for ${app.name || app.id}`);
         item.onclick = () => showAppDetails(app.id, app); // Pass basic app info as backup
+        item.onkeydown = event => {
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); item.click(); }
+        };
 
         const artworkUrl = app.artworkUrl100 || app.artworkUrl60 || '';
         const localLogoPath = getLogoPath(app.id, artworkUrl) || artworkUrl;
@@ -698,6 +808,7 @@ function renderSubscriptionApps(apps) {
     apps.forEach(app => {
         const item = document.createElement('div');
         item.className = 'app-item curated-app-item';
+        item.id = `app-${app.id}`;
         item.tabIndex = 0;
         item.setAttribute('role', 'button');
         item.setAttribute('aria-label', `View subscriptions for ${app.name}`);
@@ -778,6 +889,12 @@ function renderSubscriptionPriceSection(prices, appId) {
 }
 
 function setupSubscriptionPriceSection(section, prices, appId) {
+    prices.purchase = section.querySelector('.price-item-select').value;
+    prices.currency = section.querySelector('.price-currency-select').value;
+    if (activeItemRoute?.appId === String(appId) && activeItemRoute.view === 'subscriptions') {
+        activeItemRoute.comparison = { month: prices.month, purchase: prices.purchase, currency: prices.currency };
+        syncPageUrl({ replace: true });
+    }
     section.querySelectorAll('select').forEach(select => select.addEventListener('change', async () => {
         const request = ++detailRequestSerial;
         const state = {
@@ -798,12 +915,14 @@ function setupSubscriptionPriceSection(section, prices, appId) {
 
 async function showSubscriptionDetails(app, navigation = {}) {
     const request = ++detailRequestSerial;
+    const replaceRoute = Boolean(activeItemRoute);
+    activeItemRoute = { appId: String(app.id), view: 'subscriptions', comparison: navigation.comparison };
+    if (navigation.syncUrl !== false) syncPageUrl({ replace: replaceRoute });
     const country = navigation.country || (countrySelect.value === ALL_REGIONS ? 'us' : countrySelect.value);
     const date = navigation.date || dateSelect.value;
     const context = { ...navigation, country, date, mediaType: 'apps' };
     appModal.classList.remove('json-index-modal');
-    appModal.style.display = 'flex';
-    appModal.querySelector('.modal-content').scrollTop = 0;
+    openModal();
     modalBody.innerHTML = '<div class="loading">Loading subscriptions...</div>';
     const months = [...(priceMonthsByApp.get(String(app.id)) || [])]
         .filter(month => !/^\d{6}$/.test(date) || month <= date).sort().reverse();
@@ -926,10 +1045,12 @@ function setupArchiveTabs(container) {
 let detailRequestSerial = 0;
 async function showAppDetails(appId, basicAppInfo, navigation = {}) {
     const request = ++detailRequestSerial;
+    const replaceRoute = Boolean(activeItemRoute);
+    activeItemRoute = { appId: String(appId), view: 'details', comparison: navigation.comparison };
+    if (navigation.syncUrl !== false) syncPageUrl({ replace: replaceRoute });
     appModal.classList.remove('json-index-modal');
     modalBody.innerHTML = '<div class="loading">Loading details...</div>';
-    appModal.style.display = 'flex';
-    appModal.querySelector('.modal-content').scrollTop = 0;
+    openModal();
     const currentCountry = navigation.country || countrySelect.value;
     const mediaType = navigation.mediaType || selectedMediaType();
     const date = navigation.date || dateSelect.value;
@@ -947,6 +1068,8 @@ async function showAppDetails(appId, basicAppInfo, navigation = {}) {
     renderModalContent(details, appId, basicAppInfo, archive,
         prices && { ...prices, months: priceMonths, country: currentCountry },
         { ...navigation, country: currentCountry, mediaType, date });
+    activeItemRoute.comparison = { ...navigation.comparison, month: prices?.month || '' };
+    syncPageUrl({ replace: true });
 }
 
 const appPricesCache = {};
@@ -991,6 +1114,10 @@ function setupPriceSection(section, prices, appId, navigation) {
         const next = await getAppPrices(appId, month);
         if (!section.isConnected || event.target.value !== month) return;
         if (navigation?.comparison) navigation.comparison.month = month;
+        if (activeItemRoute?.appId === String(appId) && activeItemRoute.view === 'details') {
+            activeItemRoute.comparison = { ...activeItemRoute.comparison, month };
+            syncPageUrl({ replace: true });
+        }
         const nextPrices = { month, data: next?.data || {}, months: prices.months, country: prices.country };
         section.outerHTML = renderPriceSection(nextPrices);
         setupPriceSection(modalBody.querySelector('.price-section'), nextPrices, appId, navigation);

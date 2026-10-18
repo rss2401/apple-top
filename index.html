@@ -18,7 +18,7 @@
                 || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
         })();
     </script>
-    <link rel="stylesheet" href="style.css?v=20261018-subscriptions-4">
+    <link rel="stylesheet" href="style.css?v=20261018-page-routes">
 </head>
 <body>
     <svg class="svg-sprite" aria-hidden="true" focusable="false">
@@ -90,15 +90,17 @@
     </main>
 
     <!-- App Detail Modal -->
-    <div id="appModal" class="modal">
+    <div id="appModal" class="modal" role="dialog" aria-modal="true" aria-label="Details">
         <div class="modal-content">
-            <span class="close-modal">&times;</span>
+            <button type="button" class="close-modal" aria-label="Close dialog" aria-keyshortcuts="Escape" title="Close (Esc)">
+                <span aria-hidden="true">&times;</span> Close
+            </button>
             <div id="modalBody">
                 <!-- Content injected by JS -->
             </div>
         </div>
     </div>
 
-    <script type="module" src="script.js?v=20261018-subscriptions-4"></script>
+    <script type="module" src="script.js?v=20261018-page-routes"></script>
 </body>
 </html>
