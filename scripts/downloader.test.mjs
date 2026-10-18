@@ -64,8 +64,12 @@ test('ranking file names split into country, media type, and feed', () => {
     assert.equal(parseRankingFileName('cn_top-free.json'), null);
 });
 
-test('price lists are the lists without a country_media_ prefix', () => {
+test('price lists are regional subscription categories, with legacy names still readable', () => {
+    assert.equal(isPriceListFile('us_ai-subs.json'), true);
+    assert.equal(isPriceListFile('cn_ai-subs.json'), true);
+    assert.equal(isPriceListFile('us_apps_ai-apps-subs.json'), true);
     assert.equal(isPriceListFile('ai-subs.json'), true);
+    assert.equal(isPriceListFile('us_ai.json'), false);
     assert.equal(isPriceListFile('us_apps_ai-apps.json'), false);
     assert.equal(isPriceListFile('ai-subs.md'), false);
 });

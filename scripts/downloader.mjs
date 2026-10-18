@@ -3,6 +3,7 @@
 import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parseListFileName } from '../list-files.mjs';
 
 // Data directories live in the data repository (for example apple-top-podcasts),
 // not next to this script. The root defaults to the current working directory
@@ -99,11 +100,11 @@ export function parseRankingFileName(fileName) {
 }
 
 /**
- * Price lists sit in lists/ next to the curated lists but have no
- * country_media_ prefix (e.g. "ai-subs.json"): they are priced in every storefront.
+ * Subscription comparison lists use a country and a -subs category, such as
+ * us_ai-subs.json. The old unprefixed names remain readable during migration.
  */
 export function isPriceListFile(fileName) {
-    return fileName.endsWith('.json') && !parseRankingFileName(fileName);
+    return parseListFileName(fileName)?.priceList === true;
 }
 
 function isSelectedRankingFile(fileName, countries, mediaTypes) {
@@ -125,15 +126,19 @@ export function mapCountryToIso(country) {
 }
 
 export function hasDetailForCountry(cachedJson, country) {
+    return Boolean(getDetailForCountry(cachedJson, country));
+}
+
+export function getDetailForCountry(cachedJson, country) {
     if (!cachedJson || !Array.isArray(cachedJson.results) || cachedJson.results.length === 0) {
-        return false;
+        return null;
     }
     const targetIso = mapCountryToIso(country);
-    return cachedJson.results.some(
+    return cachedJson.results.find(
         item => item.country === targetIso
             || item.country === country
             || item.country?.toLowerCase() === String(country).toLowerCase()
-    );
+    ) || null;
 }
 
 class HttpError extends Error {
@@ -155,11 +160,11 @@ Run it from the root of a data repository (or pass --root).
 
 Commands:
   rank                     Download ranking RSS into rankings/YYYYMM/
-  details                  Download lookup JSON into details/
+  details                  Download lookup JSON; also capture listed subscriptions/in-app purchases
   media                    Download artwork, build archives, and publish the index
-  lists                    Download details and artwork only for curated lists
-  prices                   Save in-app purchase prices of the price lists' apps
-                           (lists/<name>.json) into prices/YYYYMM/, plus USD rates
+  lists                    Download details, in-app purchase prices, and artwork for curated lists
+  prices                   Save subscription comparison prices of regional lists
+                           (lists/<country>_*-subs.json) into prices/YYYYMM/, plus USD rates
   archives                 Rebuild archives/ from rankings/
   index                    Rebuild rankings.json
   all                      Run rank, details, and media in order (default)
@@ -168,7 +173,7 @@ Options:
   --media <list>           Media types: ${MEDIA_TYPES.join(', ')} (default: all)
   --root <dir>             Data repository root (default: current directory)
   --month <YYYYMM>         Archive month (default: current UTC month)
-  --skip-existing          Reuse cached ranking and detail JSON files
+  --skip-existing          Reuse cached rankings, details, and in-app purchase prices
   --generate-markdown      Generate Markdown summaries for ranking files
   --limit <number>         Results requested from each feed (default: 100)
   --countries <list>       Countries separated by commas or spaces (default: all)
@@ -627,19 +632,18 @@ export function collectMediaEntries(rankingResults, { refreshMonth } = {}) {
     return [...entries.values()];
 }
 
-// Curated lists and price lists exist only in the apps data repository; elsewhere
-// lists/ is absent. Price lists have no country and are looked up in the us store.
+// The country in the file name controls both list filtering and localized Lookup.
 async function loadCuratedLists(countries = COUNTRIES) {
     const files = (await readdir(LISTS_DIR).catch(() => []))
-        .filter(fileName => fileName.endsWith('-apps.json') || isPriceListFile(fileName))
+        .filter(fileName => parseListFileName(fileName))
         .sort();
     const lists = [];
 
     for (const fileName of files) {
         const list = await readJson(path.join(LISTS_DIR, fileName));
-        const country = String(list.feed?.country || 'us').toLowerCase();
+        const country = parseListFileName(fileName).country;
         if (!countries.includes(country)) continue;
-        lists.push({ ...list, country, fileName });
+        lists.push({ ...list, feed: { ...list.feed, country }, country, fileName });
     }
 
     return lists;
@@ -1202,6 +1206,7 @@ export async function runDetailsStage(options) {
     console.log('[stage 2/3] Downloading detail JSON...');
     const entries = await loadAllMediaEntries(options);
     await downloadDetails(entries, options);
+    await runAppPurchasePricesStage(entries, options);
     console.log(`[stage 2/3] Complete: ${entries.length} unique media item(s).`);
 }
 
@@ -1288,6 +1293,7 @@ export async function runListsStage(options) {
     }
     const entries = mergeMediaEntries(createCuratedEntries(lists));
     await downloadDetails(entries, options);
+    await runAppPurchasePricesStage(entries, options);
     const mediaItems = await loadMediaItems(entries);
     await downloadArtwork(mediaItems);
 
@@ -1302,7 +1308,7 @@ export async function runListsStage(options) {
             
             const detailPath = path.join(DETAILS_DIR, `${id}.json`);
             const detailsData = await readJson(detailPath).catch(() => null);
-            const details = detailsData?.results?.[0];
+            const details = getDetailForCountry(detailsData, list.country);
             
             if (details) {
                 item.artistName = details.artistName || item.artistName || '';
@@ -1464,10 +1470,11 @@ async function fetchStorefrontPrices(id, storefront, waitForRequestSlot) {
 }
 
 // Apps of every price list (see isPriceListFile).
-async function loadPriceListApps() {
+export async function loadPriceListApps(countries = COUNTRIES) {
     const apps = new Map();
     const files = (await readdir(LISTS_DIR).catch(() => [])).filter(isPriceListFile).sort();
     for (const fileName of files) {
+        if (!countries.includes(parseListFileName(fileName).country)) continue;
         const list = await readJson(path.join(LISTS_DIR, fileName));
         for (const item of list.feed?.results || []) {
             const id = String(item.id || '');
@@ -1504,8 +1511,57 @@ export function selectPriceStorefronts(latestSnapshot, { storefronts = null, all
         .sort();
 }
 
+// Additional subscription/in-app price requests use each current app entry's own
+// storefront. The download price continues to come from the existing Lookup JSON.
+export function planAppPurchaseRequests(entries) {
+    const apps = new Map();
+    for (const entry of entries) {
+        if (!entry.refresh || !['apps', 'software'].includes(entry.item?.kind)) continue;
+        if (!STOREFRONTS.includes(entry.country)) continue;
+        if (!apps.has(entry.id)) apps.set(entry.id, { id: entry.id, name: entry.item.name || '', storefronts: new Set() });
+        apps.get(entry.id).storefronts.add(entry.country);
+    }
+    return [...apps.values()].map(app => ({ ...app, storefronts: [...app.storefronts].sort() }));
+}
+
+function preserveStorefrontDates(snapshot) {
+    return Object.fromEntries(Object.entries(snapshot?.storefronts || {}).map(([code, value]) => [code, {
+        ...value,
+        ...(value.fetchedAt || !snapshot.fetchedAt ? {} : { fetchedAt: snapshot.fetchedAt })
+    }]));
+}
+
+export async function runAppPurchasePricesStage(entries, options) {
+    const apps = planAppPurchaseRequests(entries);
+    const waitForRequestSlot = createRequestThrottle(PRICE_PAGE_MIN_INTERVAL_MS);
+    for (const app of apps) {
+        const filePath = path.join(PRICES_DIR, options.month, `${app.id}.json`);
+        const previous = await readJson(filePath).catch(() => null);
+        const storefronts = preserveStorefrontDates(previous);
+        let changed = false;
+        for (const country of app.storefronts) {
+            if (options.skipExisting && storefronts[country]) continue;
+            storefronts[country] = {
+                ...await fetchStorefrontPrices(app.id, country, waitForRequestSlot),
+                fetchedAt: new Date().toISOString()
+            };
+            changed = true;
+        }
+        if (!changed) continue;
+        const detail = await readJson(path.join(DETAILS_DIR, `${app.id}.json`)).catch(() => null);
+        await atomicWrite(filePath, `${JSON.stringify({
+            id: app.id,
+            name: app.name || previous?.name || detail?.results?.[0]?.trackName || '',
+            month: options.month,
+            fetchedAt: new Date().toISOString(),
+            storefronts: Object.fromEntries(Object.entries(storefronts).sort(([a], [b]) => a.localeCompare(b)))
+        }, null, 2)}\n`);
+        console.log(`[in-app prices] saved ${app.id}: ${app.storefronts.join(', ')}`);
+    }
+}
+
 export async function runPricesStage(options) {
-    const apps = await loadPriceListApps();
+    const apps = await loadPriceListApps(options.countries);
     if (apps.length === 0) {
         console.log('[prices] No price list in lists/; nothing to do.');
         return;
@@ -1525,11 +1581,14 @@ export async function runPricesStage(options) {
             continue;
         }
         // Storefronts not requested this time keep the month's earlier values.
-        const storefronts = { ...(await readJson(filePath).catch(() => null))?.storefronts };
+        const storefronts = preserveStorefrontDates(await readJson(filePath).catch(() => null));
 
         for (const storefront of selected) {
             try {
-                storefronts[storefront] = await fetchStorefrontPrices(app.id, storefront, waitForRequestSlot);
+                storefronts[storefront] = {
+                    ...await fetchStorefrontPrices(app.id, storefront, waitForRequestSlot),
+                    fetchedAt: new Date().toISOString()
+                };
             } catch (error) {
                 console.warn(`[prices] failed ${app.id} ${storefront}: ${error.message}`);
                 failures.push(`${app.id}/${storefront}`);

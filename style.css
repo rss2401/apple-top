@@ -1188,7 +1188,22 @@ main {
     text-overflow: ellipsis;
 }
 
-/* In-App Purchases by Country Modal Section */
+/* Additional subscription/in-app prices in the existing cards and modal. */
+.local-price-row { display: flex; justify-content: space-between; gap: 20px; padding: 12px 0; border-bottom: 1px solid var(--info-border); font-size: 14px; }
+.local-price-row strong { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.subscription-card-price { font-size: 14px; font-weight: 600; color: var(--accent-color); }
+.subscription-card-plan { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subscription-price-section .stats-row { margin: 0 0 16px; }
+.subscription-price-section .price-row { grid-template-columns: minmax(0, 1fr) auto 86px 56px; }
+.price-row-heading { font-size: 11px; color: var(--text-secondary); }
+.price-captured { display: block; margin-top: 3px; font-size: 11px; color: var(--text-secondary); }
+.subscription-price-section .price-controls select { min-width: 0; flex: 1 1 130px; }
+.subscription-price-section .price-item-select { flex: 2 1 220px; }
+@media (max-width: 480px) {
+    .subscription-price-section .price-row { grid-template-columns: minmax(70px, 1fr) auto 74px 44px; gap: 8px; font-size: 12px; }
+}
+
+/* In-App Purchases Modal Section */
 .price-controls {
     display: flex;
     gap: 8px;

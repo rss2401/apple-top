@@ -28,6 +28,23 @@ The website loads `../apple-top-<media>/rankings.json` for every media type and 
 details, history, and artwork from the same relative base. No CORS or absolute URLs are
 involved, and a missing data site only hides its media type.
 
+The existing page, header filters, app cards, and detail modal are shared by all
+collections. An app's download price continues to come from its existing Lookup
+detail record. The downloader additionally captures listed subscriptions and other
+in-app purchase prices from that app's regional App Store page. The ordinary detail
+modal shows these extra purchases only when present, in the selected country's
+currency; it never substitutes another country's prices.
+
+List names use `<country>_<category>.json`; the repository already supplies the media
+type. Examples are `us_ai.json`, `cn_ai.json`, `us_apple.json`, and `us_google.json`.
+Select **Price Lists → US / CN → Ai Subs** in the same page to browse
+`lists/us_ai-subs.json` or `lists/cn_ai-subs.json`.
+These cards highlight purchase prices and open a comparison-focused version of the
+existing modal, with purchase, snapshot, and currency selectors. Distinct amounts
+sharing a purchase name stay separate, and ambiguous names are excluded from percentage
+comparisons because Apple may not identify billing periods. There is no separate site
+or page layout for subscriptions.
+
 Each data repository contains a short `.github/workflows/update.yml` that calls
 [`update-data.yml`](.github/workflows/update-data.yml) here with its media type. The shared
 workflow runs inside the data repository: it checks out this repository into `_tool/`, runs
@@ -47,9 +64,9 @@ node ../apple-top/scripts/downloader.mjs all --media podcasts
 | Command | Description |
 | --- | --- |
 | `rank` | Download ranking RSS JSON into `rankings/YYYYMM/` |
-| `details` | Download iTunes Lookup JSON into `details/` |
+| `details` | Download iTunes Lookup JSON; additionally capture listed subscriptions/in-app purchases |
 | `media` | Download artwork into `logos/`, rebuild `archives/` and `rankings.json` |
-| `lists` | Refresh curated lists in `lists/` (apps repository only) |
+| `lists` | Refresh curated lists, in-app purchase prices, and artwork (apps repository only) |
 | `prices` | Save in-app purchase prices into `prices/YYYYMM/` (see below) |
 | `archives` | Rebuild `archives/` from `rankings/` |
 | `index` | Rebuild `rankings.json` |
@@ -60,7 +77,7 @@ node ../apple-top/scripts/downloader.mjs all --media podcasts
 | `--media <list>` | All | `apps`, `music`, `podcasts`, `books`, `audio-books` |
 | `--root <dir>` | Current directory | Data repository root |
 | `--month <YYYYMM>` | Current UTC month | Archive month |
-| `--skip-existing` | Off | Reuse cached ranking and detail JSON files |
+| `--skip-existing` | Off | Reuse cached rankings, details, and in-app purchase prices |
 | `--generate-markdown` | Off | Generate `.md` summaries next to ranking files |
 | `--limit <number>` | `100` | Results requested from each feed |
 | `--countries <list>` | `us cn jp gb de fr` | Countries, comma or space separated |
@@ -81,8 +98,18 @@ Behaviour worth knowing:
   (404) is skipped, other unrecovered failures fail the stage so incomplete data is not
   committed.
 
-- **Prices**: price lists are the files in `lists/` without a `<country>_<media>_` prefix (e.g.
-  `lists/ai-subs.json`, ranking-feed format). For every app in them, `prices` reads its App Store page
+- **Extra subscription/in-app prices**: download prices are already stored in
+  `details/` by Lookup. In addition, `details` and `lists` fetch the App Store page in each current
+  app entry's own storefront and save its listed in-app purchases under
+  `prices/YYYYMM/<id>.json`. Historical-only entries and other media do not trigger price
+  requests. `--skip-existing` reuses a storefront already captured in that month's file.
+  The extra purchase prices are committed with app details; they do not depend on exchange rates.
+  Each storefront carries its own capture time so refreshing one country does not
+  make another country's retained prices appear newer.
+- **Subscription comparisons**: country-specific files matching `lists/<country>_*-subs.json`
+  are price lists (e.g. `lists/us_ai-subs.json` and `lists/cn_ai-subs.json`, in ranking-feed
+  format). `--countries` selects which product lists to process; shared apps are fetched
+  once. For every app in them, `prices` reads its App Store page
   (`apps.apple.com/<storefront>/app/id<id>`), about 1.5 s apart. The first run of an app, and
   any run with `--all-storefronts`, checks all 175 storefronts; later runs only revisit the
   storefronts where the latest snapshot found the app. It writes `prices/YYYYMM/<id>.json` plus `prices/YYYYMM/usd-rates.json`, the unmodified
@@ -90,9 +117,10 @@ Behaviour worth knowing:
   the listed price string and a parsed `amount`; a 404 is stored as `available: false`, and a
   page served for another storefront is a failure. Apple lists at most ten purchases per page and
   does not label subscriptions or billing periods. The workflow commits prices separately and
-  skips them, without failing the run, when any page fails.
+  skips incomplete comparison updates, without discarding already committed local
+  in-app purchase prices or failing the run, when any comparison page fails.
 
-Tests: `node --test scripts/downloader.test.mjs` (they only use temporary directories).
+Tests: `node --test scripts/*.test.mjs` (they only use temporary directories and mocked price pages).
 
 ## Local preview
 

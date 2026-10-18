@@ -1,3 +1,6 @@
+import { comparisonRows, localPurchaseItems, localStorefront, purchaseNames, selectLocalizedDetail } from './pricing-data.mjs';
+import { parseListFileName } from './list-files.mjs';
+
 const dateSelect = document.getElementById('dateSelect');
 const countrySelect = document.getElementById('countrySelect');
 const mediaTypeSelect = document.getElementById('mediaTypeSelect');
@@ -17,14 +20,13 @@ let availableFeeds = new Set();
 
 // Source value used for files under lists/ (manually curated app collections).
 const CURATED_SOURCE = 'curated';
-// Source value used for price lists: lists/<name>.json without a country_media_
-// prefix, whose apps are priced in every storefront.
 const PRICE_LIST_SOURCE = 'price-lists';
-// Region value shown for price lists, which are not tied to one storefront.
+// Price lists are not tied to a single storefront.
 const ALL_REGIONS = 'all';
 const LIST_SOURCES = [CURATED_SOURCE, PRICE_LIST_SOURCE];
 
-// apps repository: prices/YYYYMM/<id>.json with prices/YYYYMM/usd-rates.json.
+// Extra subscription/in-app purchase snapshots, separate from the download
+// price already stored in details/. Price Lists compares them on this page.
 const priceMonthsByApp = new Map();
 
 // Each media type lives in its own data repository, published next to this
@@ -154,7 +156,7 @@ loadAllIndexes()
         populateDropdowns();
         jsonListButton.disabled = !allFiles.some(file => file.parsed);
         
-        // Auto-select most recent if available (excluding Curated Lists and Price Lists)
+        // Auto-select the most recent archive, excluding list sources.
         const newestDate = Array.from(availableDates).filter(d => !LIST_SOURCES.includes(d)).sort().reverse()[0];
         if (newestDate) {
             dateSelect.value = newestDate;
@@ -178,15 +180,20 @@ function processFiles() {
         }
         // rankings/YYYYMM/<file>.json or lists/<file>.json
         const isList = parts[0] === 'lists' && parts.length === 2;
-        if (isList || (parts[0] === 'rankings' && parts.length >= 3)) {
-            const date = isList ? CURATED_SOURCE : parts[1];
+        if (isList) {
+            const list = parseListFileName(parts[1], file.SourceMedia);
+            if (!list) return;
+            const date = list.priceList ? PRICE_LIST_SOURCE : CURATED_SOURCE;
+            file.parsed = { date, country: list.legacyGlobal ? ALL_REGIONS : list.country, mediaType: list.mediaType, feed: list.feed };
+            availableDates.add(date);
+            return;
+        }
+        if (parts[0] === 'rankings' && parts.length >= 3) {
+            const date = parts[1];
             const filename = parts[parts.length - 1];
             const nameParts = filename.replace('.json', '').split('_');
 
-            if (isList && nameParts.length === 1) {
-                file.parsed = { date: PRICE_LIST_SOURCE, country: ALL_REGIONS, mediaType: file.SourceMedia, feed: nameParts[0] };
-                availableDates.add(PRICE_LIST_SOURCE);
-            } else if (nameParts.length >= 3) {
+            if (nameParts.length >= 3) {
                 const country = nameParts[0];
                 const mediaType = nameParts[1];
                 const feed = nameParts.slice(2).join('_'); // Join rest in case feed has underscores (though we use hyphens)
@@ -198,7 +205,7 @@ function processFiles() {
     });
 }
 
-// Curated Lists and Price Lists first, then archive dates from newest to oldest.
+// Curated lists and price lists first, then archive dates from newest to oldest.
 function compareSources(left, right) {
     const leftList = LIST_SOURCES.indexOf(left);
     const rightList = LIST_SOURCES.indexOf(right);
@@ -570,7 +577,9 @@ function selectRankingFile({ date, country, media, feed }) {
     loadRankings();
 }
 
+let rankingRequestSerial = 0;
 function loadRankings() {
+    const request = ++rankingRequestSerial;
     const date = dateSelect.value;
     const country = countrySelect.value;
     const mediaType = mediaTypeSelect.value;
@@ -598,35 +607,19 @@ function loadRankings() {
     fetch(fetchPath)
         .then(res => res.json())
         .then(data => {
+            if (request !== rankingRequestSerial) return;
             if (data.feed && data.feed.results) {
                 subTitle.textContent = data.feed.title || '';
-                renderApps(data.feed.results);
+                if (date === PRICE_LIST_SOURCE) renderSubscriptionApps(data.feed.results);
+                else renderApps(data.feed.results);
             } else {
                 throw new Error("Invalid data format");
             }
         })
         .catch(err => {
+            if (request !== rankingRequestSerial) return;
             appGrid.innerHTML = `<div class="error">Error loading rankings: ${escapeHtml(err.message)}</div>`;
         });
-}
-
-const COUNTRY_ISO_MAP = {
-    us: 'USA',
-    cn: 'CHN',
-    jp: 'JPN',
-    gb: 'GBR',
-    de: 'DEU',
-    fr: 'FRA'
-};
-
-function selectLocalizedDetail(results, targetCountry) {
-    if (!Array.isArray(results) || results.length === 0) return null;
-    const targetIso = COUNTRY_ISO_MAP[String(targetCountry).toLowerCase()] || String(targetCountry).toUpperCase();
-    return results.find(item => 
-        item.country === targetIso || 
-        item.country === targetCountry || 
-        item.country?.toLowerCase() === String(targetCountry).toLowerCase()
-    ) || results[0];
 }
 
 async function getAppDetails(appId, country = countrySelect.value, mediaType = selectedMediaType()) {
@@ -677,6 +670,151 @@ function renderApps(apps) {
         setImageFallbacks(item.querySelector('.app-logo'), [artworkUrl]);
         appGrid.appendChild(item);
     });
+}
+
+// Price lists keep the same grid, header filters, and detail modal as rankings.
+// Only their card summaries and modal contents are specific to price comparison.
+const comparisonRatesCache = new Map();
+
+async function getComparisonPrices(appId, month) {
+    if (!month) return null;
+    if (!comparisonRatesCache.has(month)) {
+        comparisonRatesCache.set(month, fetchJson(dataPath('apps', `prices/${month}/usd-rates.json`)).catch(() => null));
+    }
+    const [prices, rates] = await Promise.all([getAppPrices(appId, month), comparisonRatesCache.get(month)]);
+    return prices ? { ...prices, rates } : null;
+}
+
+function formatConvertedPrice(usd, currency, rates) {
+    const rate = currency === 'USD' ? 1 : Number(rates?.usd?.[currency.toLowerCase()]);
+    return Number.isFinite(usd) && rate > 0
+        ? new Intl.NumberFormat('en', { style: 'currency', currency, maximumFractionDigits: 2 }).format(usd * rate)
+        : '—';
+}
+
+function renderSubscriptionApps(apps) {
+    const sourceCountry = countrySelect.value;
+    appGrid.innerHTML = '';
+    apps.forEach(app => {
+        const item = document.createElement('div');
+        item.className = 'app-item curated-app-item';
+        item.tabIndex = 0;
+        item.setAttribute('role', 'button');
+        item.setAttribute('aria-label', `Compare prices for ${app.name}`);
+        item.onclick = () => showSubscriptionDetails(app);
+        item.onkeydown = event => {
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); item.click(); }
+        };
+        const artwork = app.artworkUrl100 || app.artworkUrl60 || '';
+        item.innerHTML = `
+            <img src="${escapeHtml(getLogoPath(app.id, artwork, 'apps') || artwork)}" alt="${escapeHtml(app.name)}" class="app-logo">
+            <div class="app-info">
+                <div class="app-header"><span class="app-name" title="${escapeHtml(app.name)}">${escapeHtml(app.name)}</span></div>
+                <div class="app-meta">${escapeHtml(app.artistName)}</div>
+                <div class="app-meta subscription-card-plan">Subscription & in-app prices</div>
+                <div class="subscription-card-price">Loading prices…</div>
+            </div>`;
+        setImageFallbacks(item.querySelector('.app-logo'), [artwork]);
+        appGrid.appendChild(item);
+        const month = [...(priceMonthsByApp.get(String(app.id)) || [])].sort().reverse()[0];
+        getComparisonPrices(app.id, month).then(prices => {
+            if (!item.isConnected) return;
+            const name = purchaseNames(prices?.data, sourceCountry)[0];
+            const rows = name ? comparisonRows(prices.data, prices.rates, name).filter(row => row.available && row.items.length) : [];
+            const cheapest = rows.flatMap(row => row.items).filter(entry => entry.usd !== null).sort((a, b) => a.usd - b.usd)[0];
+            item.querySelector('.subscription-card-plan').textContent = name || 'No purchases listed';
+            item.querySelector('.subscription-card-plan').title = name || '';
+            item.querySelector('.subscription-card-price').textContent = cheapest
+                ? `From ${formatConvertedPrice(cheapest.usd, 'USD', prices.rates)} · ${rows.length} region${rows.length === 1 ? '' : 's'}`
+                : prices ? 'No converted price available' : 'No price snapshot yet';
+        });
+    });
+}
+
+function renderSubscriptionPriceSection(prices, appId) {
+    const names = purchaseNames(prices.data, prices.country);
+    const purchase = names.includes(prices.purchase) ? prices.purchase : names[0] || '';
+    const currencies = ['USD', 'EUR', 'GBP', 'CNY', 'JPY'].filter(code => code === 'USD' || prices.rates?.usd?.[code.toLowerCase()] > 0);
+    const currency = currencies.includes(prices.currency) ? prices.currency : 'USD';
+    const regions = comparisonRows(prices.data, prices.rates, purchase).filter(row => row.available && row.items.length);
+    const rows = regions.flatMap(row => row.items.map(item => ({ ...row, item })))
+        .sort((a, b) => (a.item.usd ?? Infinity) - (b.item.usd ?? Infinity) || a.country.localeCompare(b.country));
+    const cheapest = rows.find(row => row.item.usd !== null);
+    const unavailable = Object.entries(prices.data?.storefronts || {}).filter(([, value]) => value.available === false).map(([country]) => formatRegion(country));
+    return `
+        <div class="modal-section subscription-price-section">
+            <h3>Subscription & In-App Prices</h3>
+            <div class="price-controls">
+                <select class="price-item-select" aria-label="Purchase"${names.length ? '' : ' disabled'}>
+                    ${names.length ? names.map(name => `<option${name === purchase ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('') : '<option>No purchases listed</option>'}
+                </select>
+                <select class="price-month-select" aria-label="Price snapshot month"${prices.months.length ? '' : ' disabled'}>
+                    ${prices.months.map(month => `<option value="${month}"${month === prices.month ? ' selected' : ''}>${formatDate(month)}</option>`).join('')}
+                </select>
+                <select class="price-currency-select" aria-label="Comparison currency">
+                    ${currencies.map(code => `<option${code === currency ? ' selected' : ''}>${code}</option>`).join('')}
+                </select>
+            </div>
+            <div class="stats-row">
+                ${renderStat('LOWEST LISTED', cheapest ? formatConvertedPrice(cheapest.item.usd, currency, prices.rates) : '—', cheapest ? formatRegion(cheapest.country) : '')}
+                ${renderStat('REGIONS', String(regions.length), 'Listing this purchase')}
+                ${renderStat('SNAPSHOT', prices.month ? formatDate(prices.month) : '—')}
+            </div>
+            <div class="price-row price-row-heading"><span>Region</span><span>Local price</span><span class="price-usd">${currency}</span><span class="price-diff">vs US</span></div>
+            <div class="price-rows">
+                ${rows.length ? rows.map(row => `
+                    <div class="price-row">
+                        <span class="price-region">${escapeHtml(formatRegion(row.country))}<span class="price-captured">${escapeHtml(formatAppDate(row.fetchedAt))}</span></span>
+                        <span class="price-local">${escapeHtml(row.item.price)}</span>
+                        <span class="price-usd">${formatConvertedPrice(row.item.usd, currency, prices.rates)}</span>
+                        <span class="price-diff ${row.difference < 0 ? 'cheaper' : row.difference > 0 ? 'pricier' : ''}">${row.country === 'us' ? 'US' : row.difference === null ? '—' : `${row.difference > 0 ? '+' : ''}${row.difference.toFixed(1)}%`}</span>
+                    </div>`).join('') : `<p class="price-empty">${prices.missing ? 'No price snapshot available.' : 'No captured storefront lists this purchase.'}</p>`}
+            </div>
+            <p class="price-note">Original App Store purchase names and listed amounts. Apple may omit billing periods and lists up to ten purchases. Different amounts under the same name are kept separate; ambiguous names are excluded from percentage comparisons.</p>
+            <p class="price-note">${prices.rates ? `Exchange rates: ${escapeHtml(prices.rates.date)}.` : 'Exchange rates unavailable; local amounts are retained.'}</p>
+            ${unavailable.length ? `<p class="price-note">App unavailable: ${escapeHtml(unavailable.join(', '))}.</p>` : ''}
+            ${prices.month && !prices.missing ? `<p class="price-note"><a href="${escapeHtml(dataPath('apps', `prices/${prices.month}/${appId}.json`))}" target="_blank" rel="noopener noreferrer">Snapshot JSON</a></p>` : ''}
+        </div>`;
+}
+
+function setupSubscriptionPriceSection(section, prices, appId) {
+    section.querySelectorAll('select').forEach(select => select.addEventListener('change', async () => {
+        const request = ++detailRequestSerial;
+        const state = {
+            month: section.querySelector('.price-month-select').value,
+            purchase: section.querySelector('.price-item-select').value,
+            currency: section.querySelector('.price-currency-select').value,
+            months: prices.months,
+            country: prices.country
+        };
+        const next = await getComparisonPrices(appId, state.month);
+        if (!section.isConnected || request !== detailRequestSerial) return;
+        const nextPrices = { ...state, ...next, data: next?.data || {}, missing: !next };
+        section.outerHTML = renderSubscriptionPriceSection(nextPrices, appId);
+        setupSubscriptionPriceSection(modalBody.querySelector('.subscription-price-section'), nextPrices, appId);
+    }));
+}
+
+async function showSubscriptionDetails(app) {
+    const request = ++detailRequestSerial;
+    appModal.classList.remove('json-index-modal');
+    appModal.style.display = 'flex';
+    modalBody.innerHTML = '<div class="loading">Loading subscription prices...</div>';
+    const months = [...(priceMonthsByApp.get(String(app.id)) || [])].sort().reverse();
+    const next = await getComparisonPrices(app.id, months[0]);
+    if (request !== detailRequestSerial) return;
+    const prices = { ...next, month: months[0] || '', months, country: countrySelect.value, data: next?.data || {}, missing: !next };
+    const artwork = app.artworkUrl100 || app.artworkUrl60 || '';
+    modalBody.innerHTML = `
+        <div class="modal-header-section">
+            <img src="${escapeHtml(getLogoPath(app.id, artwork, 'apps') || artwork)}" alt="${escapeHtml(app.name)}" class="modal-icon">
+            <div class="modal-title-info"><h2>${escapeHtml(app.name)}</h2><div class="modal-subtitle">${escapeHtml(app.artistName)}</div>
+                <a href="${escapeHtml(app.url)}" target="_blank" rel="noopener noreferrer" class="get-button">App Store</a>
+            </div>
+        </div>
+        ${renderSubscriptionPriceSection(prices, app.id)}`;
+    setImageFallbacks(modalBody.querySelector('.modal-icon'), [artwork]);
+    setupSubscriptionPriceSection(modalBody.querySelector('.subscription-price-section'), prices, app.id);
 }
 
 const appArchiveCache = {};
@@ -772,156 +910,73 @@ function setupArchiveTabs(container) {
     });
 }
 
+let detailRequestSerial = 0;
 async function showAppDetails(appId, basicAppInfo) {
+    const request = ++detailRequestSerial;
     appModal.classList.remove('json-index-modal');
     modalBody.innerHTML = '<div class="loading">Loading details...</div>';
-    appModal.style.display = "flex";
-
+    appModal.style.display = 'flex';
     const currentCountry = countrySelect.value;
-    const priceMonths = [...(priceMonthsByApp.get(String(appId)) || [])].sort().reverse();
+    const mediaType = selectedMediaType();
+    const date = dateSelect.value;
+    const priceMonths = mediaType === 'apps'
+        ? [...(priceMonthsByApp.get(String(appId)) || [])]
+            .filter(month => !/^\d{6}$/.test(date) || month <= date).sort().reverse()
+        : [];
     const [details, archive, prices] = await Promise.all([
-        getAppDetails(appId, currentCountry),
-        getAppArchive(appId),
+        getAppDetails(appId, currentCountry, mediaType),
+        getAppArchive(appId, mediaType),
         priceMonths.length > 0 ? getAppPrices(appId, priceMonths[0]) : null
     ]);
-
-    renderModalContent(details, appId, basicAppInfo, archive, prices && { ...prices, months: priceMonths });
+    if (request !== detailRequestSerial) return;
+    renderModalContent(details, appId, basicAppInfo, archive,
+        prices && { ...prices, months: priceMonths, country: currentCountry });
 }
 
 const appPricesCache = {};
-
 async function getAppPrices(appId, month) {
-    const cacheKey = `${month}:${appId}`;
-    if (!Object.prototype.hasOwnProperty.call(appPricesCache, cacheKey)) {
-        appPricesCache[cacheKey] = Promise.all([
-            fetchJson(dataPath('apps', `prices/${month}/${appId}.json`)),
-            fetchJson(dataPath('apps', `prices/${month}/usd-rates.json`))
-        ]).then(([data, rates]) => ({ month, data, rates })).catch(() => null);
+    const key = month + ':' + appId;
+    if (!Object.hasOwn(appPricesCache, key)) {
+        appPricesCache[key] = fetchJson(dataPath('apps', 'prices/' + month + '/' + appId + '.json'))
+            .then(data => ({ month, data })).catch(() => null);
     }
-    return appPricesCache[cacheKey];
+    return appPricesCache[key];
 }
 
 const regionNames = typeof Intl.DisplayNames === 'function'
-    ? new Intl.DisplayNames(['en'], { type: 'region' })
-    : null;
-
+    ? new Intl.DisplayNames(['en'], { type: 'region' }) : null;
 function formatRegion(code) {
-    const upper = String(code).toUpperCase();
-    try {
-        return regionNames?.of(upper) || upper;
-    } catch {
-        return upper;
-    }
-}
-
-// Purchase names in display order: the US storefront's first, then the rest.
-function listPurchaseNames(storefronts) {
-    const entries = Object.entries(storefronts).sort(([left], [right]) => (
-        (left === 'us' ? -1 : right === 'us' ? 1 : 0) || left.localeCompare(right)
-    ));
-    return [...new Set(entries.flatMap(([, value]) => (value.items || []).map(item => item.name)))];
-}
-
-function renderPriceRows(prices, purchaseName) {
-    const storefronts = prices.data.storefronts || {};
-    // usd-rates.json is the exchange API's own file: { date, usd: { cny: 6.7, ... } }.
-    const rates = prices.rates.usd || {};
-    const rateOf = currency => rates[String(currency).toLowerCase()];
-    const toUsd = (item, currency) => (
-        Number.isFinite(item.amount) && rateOf(currency) > 0 ? item.amount / rateOf(currency) : null
-    );
-    const usPrices = (storefronts.us?.items || [])
-        .filter(item => item.name === purchaseName)
-        .map(item => item.amount);
-
-    // Apple often lists several products with the same name and price (separate
-    // subscription groups or product IDs); the data keeps them all, one row is shown.
-    const rows = Object.entries(storefronts).flatMap(([code, value]) => {
-        const byPrice = new Map();
-        for (const item of (value.items || []).filter(item => item.name === purchaseName)) {
-            if (byPrice.has(item.price)) byPrice.get(item.price).count += 1;
-            else byPrice.set(item.price, { code, price: item.price, usd: toUsd(item, value.currency), count: 1 });
-        }
-        return [...byPrice.values()];
-    }).sort((left, right) => (left.usd ?? Infinity) - (right.usd ?? Infinity) || left.code.localeCompare(right.code));
-
-    if (rows.length === 0) return '<div class="price-empty">No storefront lists this purchase.</div>';
-
-    // A name can carry several plans (e.g. monthly and yearly), so each row is
-    // compared with the US price nearest to it.
-    const nearestUsPrice = usd => usPrices
-        .filter(price => price > 0)
-        .sort((left, right) => Math.abs(Math.log(usd / left)) - Math.abs(Math.log(usd / right)))[0];
-    return rows.map(row => {
-        const usReference = row.usd > 0 ? nearestUsPrice(row.usd) : null;
-        const difference = usReference
-            ? Math.round((row.usd / usReference - 1) * 100)
-            : null;
-        const differenceHtml = difference === null || row.code === 'us'
-            ? ''
-            : `<span class="price-diff ${difference < 0 ? 'cheaper' : difference > 0 ? 'pricier' : ''}">${difference > 0 ? '+' : ''}${difference}%</span>`;
-        return `
-            <div class="price-row">
-                <span class="price-region">${escapeHtml(formatRegion(row.code))}</span>
-                <span class="price-local">${escapeHtml(row.price)}${row.count > 1
-                    ? ` <span class="price-count" title="Listed ${row.count} times on the App Store page">×${row.count}</span>`
-                    : ''}</span>
-                <span class="price-usd">${row.usd === null ? '-' : `$${row.usd.toFixed(2)}`}</span>
-                ${differenceHtml}
-            </div>
-        `;
-    }).join('');
+    try { return regionNames?.of(String(code).toUpperCase()) || String(code).toUpperCase(); }
+    catch { return String(code).toUpperCase(); }
 }
 
 function renderPriceSection(prices) {
-    if (!prices?.data?.storefronts) return '';
-    const storefronts = prices.data.storefronts;
-    const names = listPurchaseNames(storefronts);
-    const unavailable = Object.entries(storefronts)
-        .filter(([, value]) => value.available === false)
-        .map(([code]) => formatRegion(code))
-        .sort();
-    const monthOptions = prices.months.map(month => (
-        `<option value="${escapeHtml(month)}"${month === prices.month ? ' selected' : ''}>${escapeHtml(formatDate(month))}</option>`
-    )).join('');
-
-    return `
-        <div class="modal-section price-section">
-            <h3>In-App Purchases by Country</h3>
-            <div class="price-controls">
-                ${names.length > 0 ? `
-                    <select class="price-item-select" aria-label="In-app purchase">
-                        ${names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('')}
-                    </select>
-                ` : ''}
-                ${prices.months.length > 1 ? `<select class="price-month-select" aria-label="Month">${monthOptions}</select>` : ''}
-            </div>
-            <div class="price-rows">
-                ${names.length > 0 ? renderPriceRows(prices, names[0]) : '<div class="price-empty">No in-app purchases listed.</div>'}
-            </div>
-            <p class="price-note">
-                Prices as listed on each App Store page (${escapeHtml(formatDate(prices.month))}), sorted by US dollar value
-                at rates of ${escapeHtml(prices.rates.date || '-')}. Apple shows at most ten purchases per storefront and
-                does not label billing periods, so a name can appear more than once.
-            </p>
-            ${unavailable.length > 0 ? `<p class="price-note">Not available in ${unavailable.length} storefront${unavailable.length === 1 ? '' : 's'}: ${escapeHtml(unavailable.join(', '))}.</p>` : ''}
-        </div>
-    `;
+    if (!prices) return '';
+    const store = localStorefront(prices.data, prices.country);
+    const unique = localPurchaseItems(prices.data, prices.country);
+    if (unique.length === 0) return '';
+    return '<div class="modal-section price-section">'
+        + '<h3>Subscriptions & In-App Purchases · ' + escapeHtml(formatRegion(prices.country)) + '</h3>'
+        + (prices.months.length > 1 ? '<div class="price-controls"><select class="price-month-select" aria-label="Price snapshot month">'
+            + prices.months.map(month => '<option value="' + month + '"' + (month === prices.month ? ' selected' : '') + '>' + formatDate(month) + '</option>').join('')
+            + '</select></div>' : '')
+        + '<div class="price-rows">' + unique.map(item =>
+            '<div class="local-price-row"><span>' + escapeHtml(item.name) + '</span><strong>' + escapeHtml(item.price) + '</strong></div>'
+        ).join('') + '</div>'
+        + '<p class="price-note">App Store · ' + escapeHtml(prices.country.toUpperCase()) + ' · '
+        + escapeHtml(formatAppDate(store?.fetchedAt || prices.data.fetchedAt))
+        + '. Prices are shown in this region’s currency. Apple lists up to ten purchases and may omit billing periods.</p></div>';
 }
 
 function setupPriceSection(section, prices, appId) {
-    const itemSelect = section.querySelector('.price-item-select');
-    itemSelect?.addEventListener('change', () => {
-        section.querySelector('.price-rows').innerHTML = renderPriceRows(prices, itemSelect.value);
-    });
-
+    if (!section) return;
     section.querySelector('.price-month-select')?.addEventListener('change', async event => {
-        const next = await getAppPrices(appId, event.target.value);
-        if (!next) return;
-        const nextPrices = { ...next, months: prices.months };
+        const month = event.target.value;
+        const next = await getAppPrices(appId, month);
+        if (!section.isConnected || event.target.value !== month) return;
+        const nextPrices = { month, data: next?.data || {}, months: prices.months, country: prices.country };
         section.outerHTML = renderPriceSection(nextPrices);
-        const replaced = modalBody.querySelector('.price-section');
-        if (replaced) setupPriceSection(replaced, nextPrices, appId);
+        setupPriceSection(modalBody.querySelector('.price-section'), nextPrices, appId);
     });
 }
 

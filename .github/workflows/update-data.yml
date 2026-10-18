@@ -72,7 +72,7 @@ jobs:
           node-version: 24
 
       - name: Run downloader unit tests
-        run: node --test _tool/scripts/downloader.test.mjs
+        run: node --test _tool/scripts/*.test.mjs
 
       - name: Prepare archive month and Git identity
         shell: bash
@@ -121,23 +121,25 @@ jobs:
         run: |
           git add -- details
           if [[ -d lists ]]; then git add -- lists; fi
+          if [[ -d prices ]]; then git add -- prices; fi
           if ! git diff --cached --quiet; then
-            git commit -m "Update ranking details $ARCHIVE_MONTH"
+            git commit -m "Update ranking details and in-app purchase prices $ARCHIVE_MONTH"
             git push
           else
             echo "No detail changes to commit."
           fi
 
       # Only the apps repository has lists/; prices does nothing without a price
-      # list (lists/<name>.json). A failed price run is not committed but does
+      # list (lists/<country>_*-subs.json). A failed price run is not committed but does
       # not hold back stage 3.
-      - name: Stage 2 - Download in-app prices
+      - name: Stage 2 - Download subscription comparison prices
         id: prices
         if: hashFiles('lists/*.json') != ''
         continue-on-error: true
         shell: bash
         run: |
           args=(prices --month "$ARCHIVE_MONTH")
+          if [[ -n "$SELECTED_COUNTRIES" ]]; then args+=(--countries "$SELECTED_COUNTRIES"); fi
           if [[ "${{ inputs.all_storefronts }}" == "true" ]]; then args+=(--all-storefronts); fi
           node "$TOOL" "${args[@]}"
 
