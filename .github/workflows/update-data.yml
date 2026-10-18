@@ -147,6 +147,7 @@ jobs:
         if: steps.prices.outcome == 'success'
         shell: bash
         run: |
+          git add -- details
           if [[ -d prices ]]; then git add -- prices; fi
           if ! git diff --cached --quiet; then
             git commit -m "Update in-app prices $ARCHIVE_MONTH"

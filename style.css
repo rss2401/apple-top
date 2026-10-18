@@ -578,7 +578,7 @@ main {
 }
 
 #dateSelect {
-    width: 118px;
+    width: 148px;
 }
 
 #countrySelect {
@@ -957,6 +957,16 @@ main {
     margin-top: 8px;
     text-transform: uppercase;
 }
+
+.modal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.modal-view-button {
+    border: 1px solid var(--accent-color);
+    background: transparent;
+    color: var(--accent-color);
+    font-family: inherit;
+    cursor: pointer;
+}
+.modal-view-button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 3px; }
 
 .stats-row {
     display: flex;

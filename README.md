@@ -37,11 +37,13 @@ currency; it never substitutes another country's prices.
 
 List names use `<country>_<category>.json`; the repository already supplies the media
 type. Examples are `us_ai.json`, `cn_ai.json`, `us_apple.json`, and `us_google.json`.
-Select **Price Lists → US / CN → Ai Subs** in the same page to browse
+Select **Subscriptions → US / CN → Ai Subs** in the same page to browse
 `lists/us_ai-subs.json` or `lists/cn_ai-subs.json`.
 These cards highlight purchase prices and open a comparison-focused version of the
-existing modal, with purchase, snapshot, and currency selectors. Distinct amounts
-sharing a purchase name stay separate, and ambiguous names are excluded from percentage
+existing modal, with purchase, snapshot, and currency selectors.
+The **App Details** and **Subscriptions** buttons switch between the two views
+without changing the selected region, snapshot, or purchase.
+Distinct amounts sharing a purchase name stay separate, and ambiguous names are excluded from percentage
 comparisons because Apple may not identify billing periods. There is no separate site
 or page layout for subscriptions.
 
@@ -109,7 +111,10 @@ Behaviour worth knowing:
 - **Subscription comparisons**: country-specific files matching `lists/<country>_*-subs.json`
   are price lists (e.g. `lists/us_ai-subs.json` and `lists/cn_ai-subs.json`, in ranking-feed
   format). `--countries` selects which product lists to process; shared apps are fetched
-  once. For every app in them, `prices` reads its App Store page
+  once. Every price-list app gets a Lookup detail record in its list's source country,
+  including apps absent from all rankings. `prices` backfills missing localized details
+  before price capture and fails if Lookup still supplies no detail; existing details
+  in other countries are preserved. For every app in them, `prices` reads its App Store page
   (`apps.apple.com/<storefront>/app/id<id>`), about 1.5 s apart. The first run of an app, and
   any run with `--all-storefronts`, checks all 175 storefronts; later runs only revisit the
   storefronts where the latest snapshot found the app. It writes `prices/YYYYMM/<id>.json` plus `prices/YYYYMM/usd-rates.json`, the unmodified

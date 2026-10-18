@@ -1206,6 +1206,7 @@ export async function runDetailsStage(options) {
     console.log('[stage 2/3] Downloading detail JSON...');
     const entries = await loadAllMediaEntries(options);
     await downloadDetails(entries, options);
+    await ensurePriceListDetails(options);
     await runAppPurchasePricesStage(entries, options);
     console.log(`[stage 2/3] Complete: ${entries.length} unique media item(s).`);
 }
@@ -1293,6 +1294,7 @@ export async function runListsStage(options) {
     }
     const entries = mergeMediaEntries(createCuratedEntries(lists));
     await downloadDetails(entries, options);
+    await ensurePriceListDetails(options);
     await runAppPurchasePricesStage(entries, options);
     const mediaItems = await loadMediaItems(entries);
     await downloadArtwork(mediaItems);
@@ -1484,6 +1486,23 @@ export async function loadPriceListApps(countries = COUNTRIES) {
     return [...apps.values()];
 }
 
+// A price-list app needs a real detail record in its list's source country,
+// regardless of whether it has ever appeared in rankings. A cache in another
+// country, or an empty Lookup response, does not satisfy that requirement.
+export async function ensurePriceListDetails(options) {
+    if (!options.mediaTypes.includes('apps')) return;
+    const lists = (await loadCuratedLists(options.countries)).filter(list => isPriceListFile(list.fileName));
+    const entries = mergeMediaEntries(createCuratedEntries(lists));
+    if (!entries.length) return;
+    await downloadDetails(entries, { ...options, skipExisting: true });
+    const missing = [];
+    for (const entry of entries) {
+        const cached = await readJson(path.join(DETAILS_DIR, `${entry.id}.json`)).catch(() => null);
+        if (!hasDetailForCountry(cached, entry.country)) missing.push(`${entry.id}/${entry.country}`);
+    }
+    if (missing.length) throw new Error(`Price-list details missing: ${missing.join(', ')}`);
+}
+
 // Newest snapshot of an app up to the given month (the month itself included).
 async function readLatestPriceSnapshot(id, month) {
     const months = (await readdir(PRICES_DIR).catch(() => []))
@@ -1567,6 +1586,7 @@ export async function runPricesStage(options) {
         return;
     }
 
+    await ensurePriceListDetails(options);
     console.log(`[prices] ${apps.length} app(s)`);
     const monthDir = path.join(PRICES_DIR, options.month);
     const waitForRequestSlot = createRequestThrottle(PRICE_PAGE_MIN_INTERVAL_MS);

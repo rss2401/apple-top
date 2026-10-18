@@ -26,7 +26,7 @@ const ALL_REGIONS = 'all';
 const LIST_SOURCES = [CURATED_SOURCE, PRICE_LIST_SOURCE];
 
 // Extra subscription/in-app purchase snapshots, separate from the download
-// price already stored in details/. Price Lists compares them on this page.
+// price already stored in details/. Subscriptions compares them on this page.
 const priceMonthsByApp = new Map();
 
 // Each media type lives in its own data repository, published next to this
@@ -230,7 +230,7 @@ function formatDate(dateStr) {
         return 'Curated Lists';
     }
     if (dateStr === PRICE_LIST_SOURCE) {
-        return 'Price Lists';
+        return 'Subscriptions';
     }
     if (/^\d{6}$/.test(dateStr)) {
         // YYYYMM -> YYYY-MM
@@ -700,7 +700,7 @@ function renderSubscriptionApps(apps) {
         item.className = 'app-item curated-app-item';
         item.tabIndex = 0;
         item.setAttribute('role', 'button');
-        item.setAttribute('aria-label', `Compare prices for ${app.name}`);
+        item.setAttribute('aria-label', `View subscriptions for ${app.name}`);
         item.onclick = () => showSubscriptionDetails(app);
         item.onkeydown = event => {
             if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); item.click(); }
@@ -711,8 +711,8 @@ function renderSubscriptionApps(apps) {
             <div class="app-info">
                 <div class="app-header"><span class="app-name" title="${escapeHtml(app.name)}">${escapeHtml(app.name)}</span></div>
                 <div class="app-meta">${escapeHtml(app.artistName)}</div>
-                <div class="app-meta subscription-card-plan">Subscription & in-app prices</div>
-                <div class="subscription-card-price">Loading prices…</div>
+                <div class="app-meta subscription-card-plan">Subscriptions & in-app purchases</div>
+                <div class="subscription-card-price">Loading subscriptions…</div>
             </div>`;
         setImageFallbacks(item.querySelector('.app-logo'), [artwork]);
         appGrid.appendChild(item);
@@ -726,7 +726,7 @@ function renderSubscriptionApps(apps) {
             item.querySelector('.subscription-card-plan').title = name || '';
             item.querySelector('.subscription-card-price').textContent = cheapest
                 ? `From ${formatConvertedPrice(cheapest.usd, 'USD', prices.rates)} · ${rows.length} region${rows.length === 1 ? '' : 's'}`
-                : prices ? 'No converted price available' : 'No price snapshot yet';
+                : prices ? 'No converted amount available' : 'No subscription snapshot yet';
         });
     });
 }
@@ -743,12 +743,12 @@ function renderSubscriptionPriceSection(prices, appId) {
     const unavailable = Object.entries(prices.data?.storefronts || {}).filter(([, value]) => value.available === false).map(([country]) => formatRegion(country));
     return `
         <div class="modal-section subscription-price-section">
-            <h3>Subscription & In-App Prices</h3>
+            <h3>Subscriptions & In-App Purchases</h3>
             <div class="price-controls">
-                <select class="price-item-select" aria-label="Purchase"${names.length ? '' : ' disabled'}>
+                <select class="price-item-select" aria-label="Subscription or in-app purchase"${names.length ? '' : ' disabled'}>
                     ${names.length ? names.map(name => `<option${name === purchase ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('') : '<option>No purchases listed</option>'}
                 </select>
-                <select class="price-month-select" aria-label="Price snapshot month"${prices.months.length ? '' : ' disabled'}>
+                <select class="price-month-select" aria-label="Subscription snapshot month"${prices.months.length ? '' : ' disabled'}>
                     ${prices.months.map(month => `<option value="${month}"${month === prices.month ? ' selected' : ''}>${formatDate(month)}</option>`).join('')}
                 </select>
                 <select class="price-currency-select" aria-label="Comparison currency">
@@ -760,7 +760,7 @@ function renderSubscriptionPriceSection(prices, appId) {
                 ${renderStat('REGIONS', String(regions.length), 'Listing this purchase')}
                 ${renderStat('SNAPSHOT', prices.month ? formatDate(prices.month) : '—')}
             </div>
-            <div class="price-row price-row-heading"><span>Region</span><span>Local price</span><span class="price-usd">${currency}</span><span class="price-diff">vs US</span></div>
+            <div class="price-row price-row-heading"><span>Region</span><span>Listed amount</span><span class="price-usd">${currency}</span><span class="price-diff">vs US</span></div>
             <div class="price-rows">
                 ${rows.length ? rows.map(row => `
                     <div class="price-row">
@@ -768,7 +768,7 @@ function renderSubscriptionPriceSection(prices, appId) {
                         <span class="price-local">${escapeHtml(row.item.price)}</span>
                         <span class="price-usd">${formatConvertedPrice(row.item.usd, currency, prices.rates)}</span>
                         <span class="price-diff ${row.difference < 0 ? 'cheaper' : row.difference > 0 ? 'pricier' : ''}">${row.country === 'us' ? 'US' : row.difference === null ? '—' : `${row.difference > 0 ? '+' : ''}${row.difference.toFixed(1)}%`}</span>
-                    </div>`).join('') : `<p class="price-empty">${prices.missing ? 'No price snapshot available.' : 'No captured storefront lists this purchase.'}</p>`}
+                    </div>`).join('') : `<p class="price-empty">${prices.missing ? 'No subscription snapshot available.' : 'No captured storefront lists this purchase.'}</p>`}
             </div>
             <p class="price-note">Original App Store purchase names and listed amounts. Apple may omit billing periods and lists up to ten purchases. Different amounts under the same name are kept separate; ambiguous names are excluded from percentage comparisons.</p>
             <p class="price-note">${prices.rates ? `Exchange rates: ${escapeHtml(prices.rates.date)}.` : 'Exchange rates unavailable; local amounts are retained.'}</p>
@@ -787,33 +787,46 @@ function setupSubscriptionPriceSection(section, prices, appId) {
             months: prices.months,
             country: prices.country
         };
+        Object.assign(prices, state);
         const next = await getComparisonPrices(appId, state.month);
         if (!section.isConnected || request !== detailRequestSerial) return;
-        const nextPrices = { ...state, ...next, data: next?.data || {}, missing: !next };
-        section.outerHTML = renderSubscriptionPriceSection(nextPrices, appId);
-        setupSubscriptionPriceSection(modalBody.querySelector('.subscription-price-section'), nextPrices, appId);
+        Object.assign(prices, state, next, { data: next?.data || {}, missing: !next });
+        section.outerHTML = renderSubscriptionPriceSection(prices, appId);
+        setupSubscriptionPriceSection(modalBody.querySelector('.subscription-price-section'), prices, appId);
     }));
 }
 
-async function showSubscriptionDetails(app) {
+async function showSubscriptionDetails(app, navigation = {}) {
     const request = ++detailRequestSerial;
+    const country = navigation.country || (countrySelect.value === ALL_REGIONS ? 'us' : countrySelect.value);
+    const date = navigation.date || dateSelect.value;
+    const context = { ...navigation, country, date, mediaType: 'apps' };
     appModal.classList.remove('json-index-modal');
     appModal.style.display = 'flex';
-    modalBody.innerHTML = '<div class="loading">Loading subscription prices...</div>';
-    const months = [...(priceMonthsByApp.get(String(app.id)) || [])].sort().reverse();
-    const next = await getComparisonPrices(app.id, months[0]);
+    appModal.querySelector('.modal-content').scrollTop = 0;
+    modalBody.innerHTML = '<div class="loading">Loading subscriptions...</div>';
+    const months = [...(priceMonthsByApp.get(String(app.id)) || [])]
+        .filter(month => !/^\d{6}$/.test(date) || month <= date).sort().reverse();
+    const month = months.includes(navigation.comparison?.month) ? navigation.comparison.month : months[0] || '';
+    const next = await getComparisonPrices(app.id, month);
     if (request !== detailRequestSerial) return;
-    const prices = { ...next, month: months[0] || '', months, country: countrySelect.value, data: next?.data || {}, missing: !next };
+    const prices = { ...navigation.comparison, ...next, month, months, country, data: next?.data || {}, missing: !next };
     const artwork = app.artworkUrl100 || app.artworkUrl60 || '';
     modalBody.innerHTML = `
         <div class="modal-header-section">
             <img src="${escapeHtml(getLogoPath(app.id, artwork, 'apps') || artwork)}" alt="${escapeHtml(app.name)}" class="modal-icon">
             <div class="modal-title-info"><h2>${escapeHtml(app.name)}</h2><div class="modal-subtitle">${escapeHtml(app.artistName)}</div>
-                <a href="${escapeHtml(app.url)}" target="_blank" rel="noopener noreferrer" class="get-button">App Store</a>
+                <div class="modal-actions">
+                    <a href="${escapeHtml(app.url)}" target="_blank" rel="noopener noreferrer" class="get-button">App Store</a>
+                    <button type="button" class="get-button modal-view-button">App Details</button>
+                </div>
             </div>
         </div>
         ${renderSubscriptionPriceSection(prices, app.id)}`;
     setImageFallbacks(modalBody.querySelector('.modal-icon'), [artwork]);
+    modalBody.querySelector('.modal-view-button').onclick = () => showAppDetails(app.id, app, {
+        ...context, comparison: { month: prices.month, purchase: prices.purchase, currency: prices.currency }
+    });
     setupSubscriptionPriceSection(modalBody.querySelector('.subscription-price-section'), prices, app.id);
 }
 
@@ -911,26 +924,29 @@ function setupArchiveTabs(container) {
 }
 
 let detailRequestSerial = 0;
-async function showAppDetails(appId, basicAppInfo) {
+async function showAppDetails(appId, basicAppInfo, navigation = {}) {
     const request = ++detailRequestSerial;
     appModal.classList.remove('json-index-modal');
     modalBody.innerHTML = '<div class="loading">Loading details...</div>';
     appModal.style.display = 'flex';
-    const currentCountry = countrySelect.value;
-    const mediaType = selectedMediaType();
-    const date = dateSelect.value;
+    appModal.querySelector('.modal-content').scrollTop = 0;
+    const currentCountry = navigation.country || countrySelect.value;
+    const mediaType = navigation.mediaType || selectedMediaType();
+    const date = navigation.date || dateSelect.value;
     const priceMonths = mediaType === 'apps'
         ? [...(priceMonthsByApp.get(String(appId)) || [])]
             .filter(month => !/^\d{6}$/.test(date) || month <= date).sort().reverse()
         : [];
+    const month = priceMonths.includes(navigation.comparison?.month) ? navigation.comparison.month : priceMonths[0];
     const [details, archive, prices] = await Promise.all([
         getAppDetails(appId, currentCountry, mediaType),
         getAppArchive(appId, mediaType),
-        priceMonths.length > 0 ? getAppPrices(appId, priceMonths[0]) : null
+        month ? getAppPrices(appId, month) : null
     ]);
     if (request !== detailRequestSerial) return;
     renderModalContent(details, appId, basicAppInfo, archive,
-        prices && { ...prices, months: priceMonths, country: currentCountry });
+        prices && { ...prices, months: priceMonths, country: currentCountry },
+        { ...navigation, country: currentCountry, mediaType, date });
 }
 
 const appPricesCache = {};
@@ -957,7 +973,7 @@ function renderPriceSection(prices) {
     if (unique.length === 0) return '';
     return '<div class="modal-section price-section">'
         + '<h3>Subscriptions & In-App Purchases · ' + escapeHtml(formatRegion(prices.country)) + '</h3>'
-        + (prices.months.length > 1 ? '<div class="price-controls"><select class="price-month-select" aria-label="Price snapshot month">'
+        + (prices.months.length > 1 ? '<div class="price-controls"><select class="price-month-select" aria-label="Subscription snapshot month">'
             + prices.months.map(month => '<option value="' + month + '"' + (month === prices.month ? ' selected' : '') + '>' + formatDate(month) + '</option>').join('')
             + '</select></div>' : '')
         + '<div class="price-rows">' + unique.map(item =>
@@ -968,15 +984,16 @@ function renderPriceSection(prices) {
         + '. Prices are shown in this region’s currency. Apple lists up to ten purchases and may omit billing periods.</p></div>';
 }
 
-function setupPriceSection(section, prices, appId) {
+function setupPriceSection(section, prices, appId, navigation) {
     if (!section) return;
     section.querySelector('.price-month-select')?.addEventListener('change', async event => {
         const month = event.target.value;
         const next = await getAppPrices(appId, month);
         if (!section.isConnected || event.target.value !== month) return;
+        if (navigation?.comparison) navigation.comparison.month = month;
         const nextPrices = { month, data: next?.data || {}, months: prices.months, country: prices.country };
         section.outerHTML = renderPriceSection(nextPrices);
-        setupPriceSection(modalBody.querySelector('.price-section'), nextPrices, appId);
+        setupPriceSection(modalBody.querySelector('.price-section'), nextPrices, appId, navigation);
     });
 }
 
@@ -1072,7 +1089,7 @@ function renderInfoRows(rows) {
         .join('');
 }
 
-function renderModalContent(details, appId, basicAppInfo, archive, prices = null) {
+function renderModalContent(details, appId, basicAppInfo, archive, prices = null, navigation = {}) {
     const app = details || {};
     const title = app.trackName || app.collectionName || basicAppInfo.name || 'Untitled';
     const subtitle = app.artistName || app.sellerName || basicAppInfo.artistName || '';
@@ -1089,7 +1106,7 @@ function renderModalContent(details, appId, basicAppInfo, archive, prices = null
     const versionArtworkUrl = basicAppInfo.artworkUrl100
         || basicAppInfo.artworkUrl60
         || artworkUrl;
-    const localLogoPath = getLogoPath(appId, versionArtworkUrl) || versionArtworkUrl;
+    const localLogoPath = getLogoPath(appId, versionArtworkUrl, navigation.mediaType) || versionArtworkUrl;
     const storeUrl = app.trackViewUrl || app.collectionViewUrl || basicAppInfo.url || '#';
     const price = formatPrice(app);
     const genres = formatGenres(app.genres) || app.primaryGenreName || formatGenres(basicAppInfo.genres);
@@ -1146,6 +1163,9 @@ function renderModalContent(details, appId, basicAppInfo, archive, prices = null
     }
 
     const archiveHtml = renderArchiveSection(archive, appId);
+    const canCompare = isSoftware && (navigation.comparison || Object.values(prices?.data?.storefronts || {})
+        .some(store => store.available !== false && store.items?.length));
+    if (canCompare) navigation.comparison = { ...navigation.comparison, month: prices?.month || navigation.comparison?.month };
 
     modalBody.innerHTML = `
         <div class="modal-header-section">
@@ -1153,7 +1173,10 @@ function renderModalContent(details, appId, basicAppInfo, archive, prices = null
             <div class="modal-title-info">
                 <h2>${escapeHtml(title)}</h2>
                 <div class="modal-subtitle">${escapeHtml(subtitle)}</div>
-                <a href="${escapeHtml(storeUrl)}" target="_blank" rel="noopener noreferrer" class="get-button">${escapeHtml(price || 'View on Apple')}</a>
+                <div class="modal-actions">
+                    <a href="${escapeHtml(storeUrl)}" target="_blank" rel="noopener noreferrer" class="get-button">${escapeHtml(price || 'View on Apple')}</a>
+                    ${canCompare ? '<button type="button" class="get-button modal-view-button">Subscriptions</button>' : ''}
+                </div>
             </div>
         </div>
 
@@ -1184,8 +1207,13 @@ function renderModalContent(details, appId, basicAppInfo, archive, prices = null
         [versionArtworkUrl]
     );
 
+    modalBody.querySelector('.modal-view-button')?.addEventListener('click', () => showSubscriptionDetails({
+        ...basicAppInfo, id: String(appId), kind: 'apps', name: title, artistName: subtitle,
+        artworkUrl100: versionArtworkUrl, url: storeUrl
+    }, navigation));
+
     const priceSection = modalBody.querySelector('.price-section');
-    if (priceSection) setupPriceSection(priceSection, prices, appId);
+    if (priceSection) setupPriceSection(priceSection, prices, appId, navigation);
 
     if (archiveHtml) {
         setupArchiveTabs(modalBody.querySelector('.archive-section'));

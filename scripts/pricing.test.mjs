@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { comparisonRows, localPurchaseItems, localStorefront, purchaseNames, selectLocalizedDetail, toUsd } from '../pricing-data.mjs';
-import { main, planAppPurchaseRequests, runAppPurchasePricesStage, setDataRoot } from './downloader.mjs';
+import { ensurePriceListDetails, main, parseArguments, planAppPurchaseRequests, runAppPurchasePricesStage, setDataRoot } from './downloader.mjs';
 
 test('app details and local purchases never fall back to another region', () => {
     const us = { country: 'USA', wrapperType: 'software', formattedPrice: '$9.99' };
@@ -89,6 +89,64 @@ test('details keeps the existing download price and adds optional in-app purchas
         await runAppPurchasePricesStage([{ id: '3', country: 'us', refresh: true, item: { kind: 'apps' } }], { month: '202610' });
         const withoutPurchases = JSON.parse(await readFile(path.join(root, 'prices', '202610', '3.json'), 'utf8'));
         assert.deepEqual(withoutPurchases.storefronts.us.items, []);
+    } finally {
+        globalThis.fetch = previousFetch;
+        setDataRoot(process.cwd());
+        assert.ok(path.resolve(root).startsWith(path.join(tmpdir(), 'apple-top-price-test-')));
+        await rm(root, { recursive: true, force: true });
+    }
+});
+
+test('prices backfills source-country details without a ranking and reuses valid details', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'apple-top-price-test-'));
+    const previousFetch = globalThis.fetch;
+    const requests = [];
+    try {
+        await mkdir(path.join(root, 'lists'));
+        await mkdir(path.join(root, 'details'));
+        await writeFile(path.join(root, 'lists', 'cn_ai-subs.json'), JSON.stringify({ feed: { results: [{ id: '1', kind: 'apps', name: 'Demo' }] } }));
+        const us = { trackId: 1, kind: 'software', country: 'USA', description: 'US details', formattedPrice: 'Free' };
+        const cn = { trackId: 1, kind: 'software', country: 'CHN', description: '国区详情', formattedPrice: '免费' };
+        await writeFile(path.join(root, 'details', '1.json'), JSON.stringify({ resultCount: 1, results: [us] }));
+        const page = '<script id="serialized-server-data" type="application/json">'
+            + JSON.stringify({ data: [{ intent: { $kind: 'ProductPageIntent', storefront: 'cn' } }] }) + '</script>';
+        globalThis.fetch = async url => {
+            requests.push(String(url));
+            if (String(url).includes('itunes.apple.com/lookup')) return Response.json({ resultCount: 1, results: [cn] });
+            if (String(url).includes('apps.apple.com')) return new Response(page);
+            return Response.json({ date: '2026-10-18', usd: { usd: 1 } });
+        };
+        const args = ['prices', '--root', root, '--media', 'apps', '--countries', 'cn', '--storefronts', 'cn', '--month', '202610'];
+        await main(args);
+        assert.equal(requests[0], 'https://itunes.apple.com/lookup?id=1&country=cn');
+        assert.equal(requests[1], 'https://apps.apple.com/cn/app/id1');
+        const saved = JSON.parse(await readFile(path.join(root, 'details', '1.json'), 'utf8'));
+        assert.equal(saved.resultCount, 2);
+        assert.deepEqual(saved.results, [us, cn]);
+        assert.ok(JSON.parse(await readFile(path.join(root, 'prices', '202610', '1.json'), 'utf8')).storefronts.cn);
+        const before = requests.length;
+        await ensurePriceListDetails(parseArguments(args));
+        assert.equal(requests.length, before);
+    } finally {
+        globalThis.fetch = previousFetch;
+        setDataRoot(process.cwd());
+        assert.ok(path.resolve(root).startsWith(path.join(tmpdir(), 'apple-top-price-test-')));
+        await rm(root, { recursive: true, force: true });
+    }
+});
+
+test('prices stops when Lookup omits the source-country detail, even with another country cached', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'apple-top-price-test-'));
+    const previousFetch = globalThis.fetch;
+    const requests = [];
+    try {
+        await mkdir(path.join(root, 'lists'));
+        await mkdir(path.join(root, 'details'));
+        await writeFile(path.join(root, 'lists', 'cn_ai-subs.json'), JSON.stringify({ feed: { results: [{ id: '1' }] } }));
+        await writeFile(path.join(root, 'details', '1.json'), JSON.stringify({ resultCount: 1, results: [{ trackId: 1, country: 'USA' }] }));
+        globalThis.fetch = async url => { requests.push(String(url)); return Response.json({ resultCount: 0, results: [] }); };
+        await assert.rejects(main(['prices', '--root', root, '--countries', 'cn', '--storefronts', 'cn']), /Price-list details missing: 1\/cn/);
+        assert.deepEqual(requests, ['https://itunes.apple.com/lookup?id=1&country=cn']);
     } finally {
         globalThis.fetch = previousFetch;
         setDataRoot(process.cwd());
