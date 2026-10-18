@@ -683,7 +683,6 @@ function summarizeMedia(entry, lookupData) {
         id: entry.id,
         name: details.trackName || details.collectionName || details.name || entry.item.name || '',
         description: details.description || details.longDescription || '',
-        artworkUrl,
         versionArtworkUrls: entry.artworkUrls.length > 0
             ? entry.artworkUrls
             : artworkUrl ? [artworkUrl] : []
@@ -964,11 +963,10 @@ async function downloadArtwork(mediaItems) {
     const failures = [];
 
     await runSequential(itemsWithArtwork, async item => {
-        const stableFilePath = path.join(LOGOS_DIR, `${item.id}.png`);
+        // Each file is written once, named after the URL it was downloaded
+        // from, and never renamed or overwritten afterwards.
         const versions = planArtworkVersions(item.id, item.versionArtworkUrls);
         const newest = versions.at(-1);
-        const newestFilePath = path.join(LOGOS_DIR, newest.fileName);
-        let newestDownloaded = false;
 
         for (const version of versions) {
             const filePath = path.join(LOGOS_DIR, version.fileName);
@@ -978,36 +976,16 @@ async function downloadArtwork(mediaItems) {
                     responseType: 'binary',
                     skipExisting: false
                 });
-                if (version === newest) newestDownloaded = true;
                 console.log(`[media] saved ${version.fileName}`);
             } catch (error) {
                 // Older artwork versions may be gone from Apple's CDN; only the
-                // stable file below decides whether this item failed.
+                // newest version decides whether this item failed.
                 console.warn(`[media] version unavailable ${version.fileName}: ${error.message}`);
             }
         }
 
-        try {
-            if (newestDownloaded) {
-                await atomicWrite(stableFilePath, await readFile(newestFilePath));
-            } else if (!await fileExists(stableFilePath)) {
-                if (await fileExists(newestFilePath)) {
-                    await atomicWrite(stableFilePath, await readFile(newestFilePath));
-                    console.log(`[media] restored ${item.id}.png`);
-                } else if (item.artworkUrl) {
-                    await downloadToFile(toLargeArtworkUrl(item.artworkUrl), stableFilePath, {
-                        responseType: 'binary',
-                        skipExisting: false
-                    });
-                    console.log(`[media] saved ${item.id}.png from lookup artwork`);
-                }
-            }
-        } catch (error) {
-            console.warn(`[media] stable artwork update failed ${item.id}: ${error.message}`);
-        }
-
-        if (!await fileExists(stableFilePath)) {
-            console.warn(`[media] failed ${item.id}: no artwork available`);
+        if (!await fileExists(path.join(LOGOS_DIR, newest.fileName))) {
+            console.warn(`[media] failed ${item.id}: newest artwork unavailable`);
             failures.push(item.id);
         }
 
@@ -1086,23 +1064,19 @@ async function generateMarkdownFiles(month, countries = COUNTRIES, mediaTypes = 
             const description = details.description || details.longDescription || '';
             const anchor = createAnchor(title, id);
             const versionArtworkUrl = item.artworkUrl100 || item.artworkUrl60 || '';
-            const versionLogoPath = versionArtworkUrl
-                ? path.join(LOGOS_DIR, getArtworkFileName(id, versionArtworkUrl))
+            const logoPath = versionArtworkUrl
+                ? path.relative(
+                    path.dirname(rankingFile),
+                    path.join(LOGOS_DIR, getArtworkFileName(id, versionArtworkUrl))
+                ).split(path.sep).join('/')
                 : '';
-            const logoFilePath = versionLogoPath && await fileExists(versionLogoPath)
-                ? versionLogoPath
-                : path.join(LOGOS_DIR, `${id}.png`);
-            const logoPath = path.relative(
-                path.dirname(rankingFile),
-                logoFilePath
-            ).split(path.sep).join('/');
 
             toc.push(`- [${escapeMarkdown(title)}](#${anchor})`);
             sections.push([
                 `<a id="${anchor}"></a>`,
                 `## ${title}`,
                 '',
-                `![${escapeMarkdown(title)}](${logoPath})`,
+                logoPath ? `![${escapeMarkdown(title)}](${logoPath})` : '',
                 '',
                 description,
                 '',

@@ -49,14 +49,11 @@ function hashArtworkUrl(url) {
     return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
-function getStableLogoPath(id, mediaType = selectedMediaType()) {
-    return dataPath(mediaType, `logos/${id}.png`);
-}
-
-function getVersionedLogoPath(id, artworkUrl, mediaType = selectedMediaType()) {
+// logos/ only holds <id>-<hash of the ranking artwork URL>.png files.
+function getLogoPath(id, artworkUrl, mediaType = selectedMediaType()) {
     return artworkUrl
         ? dataPath(mediaType, `logos/${id}-${hashArtworkUrl(artworkUrl)}.png`)
-        : getStableLogoPath(id, mediaType);
+        : '';
 }
 
 function setImageFallbacks(image, fallbackUrls) {
@@ -347,12 +344,13 @@ function formatFileSize(bytes) {
     return `${(size / 1024 ** 2).toFixed(1)} MB`;
 }
 
+// Files in apple-top-apps/logos/; versioned logo files are never removed.
 const OFFICIAL_MEDIA_LOGOS = {
-    apps: { id: '375380948', alt: 'Apple Store' },
-    music: { id: '1598433714', alt: 'Apple Music Classical' },
-    podcasts: { id: '525463029', alt: 'Apple Podcasts' },
-    books: { id: '364709193', alt: 'Apple Books' },
-    'audio-books': { id: '364709193', alt: 'Apple Books' }
+    apps: { file: '375380948-428807b0.png', alt: 'Apple Store' },
+    music: { file: '1598433714-a1d01ea9.png', alt: 'Apple Music Classical' },
+    podcasts: { file: '525463029-1ffa6124.png', alt: 'Apple Podcasts' },
+    books: { file: '364709193-8d4818f2.png', alt: 'Apple Books' },
+    'audio-books': { file: '364709193-8d4818f2.png', alt: 'Apple Books' }
 };
 
 function renderMediaIcon(mediaType) {
@@ -369,7 +367,7 @@ function renderMediaIcon(mediaType) {
 
     if (official) {
         return `
-            <img src="${escapeHtml(getStableLogoPath(official.id, 'apps'))}"
+            <img src="${escapeHtml(dataPath('apps', `logos/${official.file}`))}"
                  alt="${escapeHtml(official.alt)}" 
                  class="media-official-logo" 
                  loading="lazy" 
@@ -650,8 +648,8 @@ function renderApps(apps) {
         item.className = 'app-item';
         item.onclick = () => showAppDetails(app.id, app); // Pass basic app info as backup
 
-        const localLogoPath = getStableLogoPath(app.id);
         const artworkUrl = app.artworkUrl100 || app.artworkUrl60 || '';
+        const localLogoPath = getLogoPath(app.id, artworkUrl) || artworkUrl;
         const name = app.name || `App ${app.id}`;
         const artistName = app.artistName || '';
         
@@ -702,7 +700,7 @@ function renderArchiveSection(archive, appId) {
 
     const historyItemsHtml = sortedHistory.map(entry => {
         const logoUrl = entry.artworkUrl100 || entry.artworkUrl60 || entry.artworkUrl || '';
-        const versionedLogo = getVersionedLogoPath(appId, logoUrl);
+        const versionedLogo = getLogoPath(appId, logoUrl) || logoUrl;
         const formattedDate = formatDate(monthOf(entry));
         const countryCode = (entry.country || 'us').toUpperCase();
         const feedLabel = (entry.feed || '').replace(/-/g, ' ');
@@ -874,7 +872,6 @@ function renderInfoRows(rows) {
 
 function renderModalContent(details, appId, basicAppInfo, archive) {
     const app = details || {};
-    const stableLogoPath = getStableLogoPath(appId);
     const title = app.trackName || app.collectionName || basicAppInfo.name || 'Untitled';
     const subtitle = app.artistName || app.sellerName || basicAppInfo.artistName || '';
     const kind = basicAppInfo.kind || app.kind || app.collectionType?.toLowerCase() || app.wrapperType;
@@ -890,7 +887,7 @@ function renderModalContent(details, appId, basicAppInfo, archive) {
     const versionArtworkUrl = basicAppInfo.artworkUrl100
         || basicAppInfo.artworkUrl60
         || artworkUrl;
-    const localLogoPath = getVersionedLogoPath(appId, versionArtworkUrl);
+    const localLogoPath = getLogoPath(appId, versionArtworkUrl) || versionArtworkUrl;
     const storeUrl = app.trackViewUrl || app.collectionViewUrl || basicAppInfo.url || '#';
     const price = formatPrice(app);
     const genres = formatGenres(app.genres) || app.primaryGenreName || formatGenres(basicAppInfo.genres);
@@ -980,7 +977,7 @@ function renderModalContent(details, appId, basicAppInfo, archive) {
 
     setImageFallbacks(
         modalBody.querySelector('.modal-icon'),
-        [stableLogoPath, versionArtworkUrl]
+        [versionArtworkUrl]
     );
 
     if (archiveHtml) {

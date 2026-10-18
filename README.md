@@ -70,8 +70,10 @@ Behaviour worth knowing:
   appear in older months are fetched only when their detail file is missing. Lookup requests
   are batched (25 IDs), spaced at least 3.25 s apart, and back off on HTTP 403/429.
 - **Artwork**: `logos/<id>-<hash>.png` is named after the ranking's artwork URL and contains the
-  large (`600x600bb`, see `ARTWORK_SIZE_TOKEN`) rendition of that same image; `logos/<id>.png`
-  is the newest version. Old versions that Apple no longer serves only produce a warning.
+  large (`600x600bb`, see `ARTWORK_SIZE_TOKEN`) rendition of that same image. Each file is
+  written once and never renamed or overwritten; the website computes the file name from the
+  artwork URL it already has. Only the newest version is required; old versions that Apple no
+  longer serves only produce a warning.
 - **Failures**: requests time out and retry; writes go through temporary files. A missing feed
   (404) is skipped, other unrecovered failures fail the stage so incomplete data is not
   committed.
